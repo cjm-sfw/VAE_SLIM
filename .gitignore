@@ -1,0 +1,9 @@
+.ipynb_checkpoints/*
+/ckpt/
+.__pycache__/*
+**.pyc
+/vis
+/runs
+/train_images
+/eval_images
+.env
