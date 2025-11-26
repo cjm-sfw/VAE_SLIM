@@ -4,6 +4,72 @@ import torch.nn.functional as F
 import matplotlib.pyplot as plt
 import numpy as np
 import cv2
+from sklearn.cluster import KMeans
+from sklearn.decomposition import PCA
+
+def pca_visualize_and_save(
+    feature_map: torch.Tensor, save_path: str, cluster_size: int, n_components=2
+):
+    # 确保输入是torch.Tensor类型
+    if not isinstance(feature_map, torch.Tensor):
+        raise ValueError("Input must be a torch.Tensor")
+
+    # 将torch.Tensor转换为numpy.ndarray
+    feature_map_np = feature_map.to(torch.float32).detach().cpu().numpy()
+
+    # 展开特征图为一个二维数组 (batch_size * height * width, channels)
+    # 这里假设batch_size为1，如果不是1则需要额外处理
+    if feature_map_np.shape[0] != 1:
+        raise ValueError("Batch size must be 1 for this function")
+
+    flat_feature_map = feature_map_np[0].reshape(-1, feature_map_np.shape[1])
+
+    # 执行PCA降维到2维（方便可视化）
+    pca = PCA(n_components=n_components)
+    reduced_data = pca.fit_transform(flat_feature_map)
+
+    # 使用KMeans进行聚类（例如，聚成5类）
+    kmeans = KMeans(n_clusters=cluster_size, random_state=0)
+    labels = kmeans.fit_predict(reduced_data)
+
+    # 可视化聚类结果并保存图像
+    plt.figure(figsize=(10, 8))
+    scatter = plt.scatter(
+        reduced_data[:, 0], reduced_data[:, 1], c=labels, cmap="viridis"
+    )
+    plt.colorbar(scatter)
+    plt.title("PCA and KMeans Clustering of Feature Map")
+    plt.xlabel("PCA Component 1")
+    plt.ylabel("PCA Component 2")
+    plt.savefig(save_path + "/pca_clustering.png")  # 保存散点图到指定路径
+    plt.close()  # 关闭图形窗口，因为我们不需要显示它
+
+    # 如果需要保存聚类的标签图像（height x width），这里我们简单地将标签映射回原空间大小
+    # 并生成一个伪彩色图像（注意：这只是一个简单的示例）
+    height, width = feature_map_np.shape[2], feature_map_np.shape[3]
+    label_image = np.zeros((height, width), dtype=np.uint8)
+    for i in range(height):
+        for j in range(width):
+            index = i * width + j
+            label_image[i, j] = labels[index]
+
+    # 使用colormap将标签映射为颜色图像
+    color_map = plt.cm.viridis(
+        label_image / np.max(label_image, initial=0, where=np.isfinite)
+    )  # 防止除以0的错误
+    color_image = (color_map[:, :, :3] * 255).astype(np.uint8)
+
+    # 将numpy数组转换为PIL图像并保存
+    from PIL import Image
+    img = Image.fromarray(color_image)
+    img.save(save_path + "/cluster_label_image.png")
+
+
+# 示例用法
+# 假设feature_map是一个形状为(1, 256, 64, 64)的torch.Tensor特征图
+# np.random.seed(0)  # 如果需要可重复的结果，可以取消注释这行代码
+# feature_map = torch.rand((1, 256, 64, 64))  # 创建一个随机特征图作为示例
+# pca_visualize_and_save(feature_map, 'path/to/save')  # 调用函数并指定保存路径
 
 def visualize_spectrum(image):
     """可视化图像频谱"""
@@ -26,7 +92,7 @@ def visualize_spectrum(image):
         
         return fig
 
-def visualize_spectrum_comparison(original, vae, pca_model):
+def visualize_spectrum_comparison(original, vae, pca_model, n_components=16, n_channels=16):
     """可视化频谱对比"""
     import matplotlib.pyplot as plt
     with torch.no_grad():
@@ -35,10 +101,10 @@ def visualize_spectrum_comparison(original, vae, pca_model):
         b, _, h, w = z_original.shape
         
         z_pca = pca_model.transform(
-            z_original.permute(0, 2, 3, 1).reshape(-1, 16)
+            z_original.permute(0, 2, 3, 1).reshape(-1, n_channels)
         )
         z_pca_recon = pca_model.inverse_transform(z_pca)
-        z_pca_recon = z_pca_recon.reshape(b, h, w, 16).permute(0, 3, 1, 2)
+        z_pca_recon = z_pca_recon.reshape(b, h, w, n_channels).permute(0, 3, 1, 2)
         
         # 计算频谱
         z_original_fft = torch.fft.fft2(z_original.float(), dim=(-2, -1))
@@ -322,7 +388,7 @@ def log_training_progress(writer, images, reconstructions, epoch):
     writer.add_images('Training/Reconstructed_Images', reconstructions[:8], epoch)
     
 
-def plot_images(images, titles=None, ncols=4):
+def plot_images(images, titles=None, ncols=4, save_path=None):
     nrows = (len(images) + ncols - 1) // ncols
     fig, axs = plt.subplots(nrows, ncols, figsize=(15, 5 * nrows))
     axs = axs.flatten()
@@ -338,6 +404,9 @@ def plot_images(images, titles=None, ncols=4):
     
     plt.tight_layout()
     plt.show()
+    if save_path:
+        plt.savefig(save_path)
+    plt.close()
     
 def plot_figure(tensor, save_path=None):
     # tensor: [B, C, H, W]

@@ -41,6 +41,8 @@ class ColorAwarePCAPredictor(nn.Module):
     def __init__(self, input_channels=3, latent_pca_dim=3, reduction_factor=8, high_freq_enable=False):
         super().__init__()
         
+        self.high_freq_enable = high_freq_enable
+        
         # 亮度分支 (对应PC1)
         self.brightness_branch = nn.Sequential(
             nn.Conv2d(input_channels, 32, 3, stride=2, padding=1),
@@ -63,30 +65,32 @@ class ColorAwarePCAPredictor(nn.Module):
             nn.Conv2d(64, 2, 1)  # 输出两个颜色对立分量
         )
         
-        if high_freq_enable:
+        if self.high_freq_enable:
             # 高频分支 (可选)
             self.high_freq_branch = nn.Sequential(
-                nn.Conv2d(input_channels, 32, 3, stride=2, padding=1),
+                nn.Conv2d(input_channels, 32, 3, stride=1, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(32, 64, 3, stride=1, padding=1),
+                nn.SiLU(),
+                nn.Conv2d(64, 32, 3, stride=2, padding=1),
                 nn.SiLU(),
                 nn.Conv2d(32, 64, 3, stride=2, padding=1),
                 nn.SiLU(),
                 nn.Conv2d(64, 64, 3, stride=2, padding=1),
                 nn.SiLU(),
-                nn.Conv2d(64, 3, 1)  # 输出高频分量
+                nn.Conv2d(64, 1, 1)  # 输出高频分量
+                
             )
         
     def forward(self, x):
         brightness = self.brightness_branch(x)  # [batch, 1, H/8, W/8]
         color = self.color_branch(x)            # [batch, 2, H/8, W/8]
         
-        
-        # 拼接成3通道PCA潜变量
-        try:
+        if self.high_freq_enable:
+            high_freq = self.high_freq_branch(x)  # [batch, 1, H/8, W/8]
+            z_pca = torch.cat([brightness, color, high_freq], dim=1)  # [batch, 3, H/8, W/8]
+        else:
             z_pca = torch.cat([brightness, color], dim=1)  # [batch, 3, H/8, W/8]
-        except Exception as e:
-            print(f"Error in concatenation: {e}")
-            print(f"Brightness shape: {brightness.shape}, Color shape: {color.shape}")
-            import pdb;pdb.set_trace()
 
         return z_pca
     
@@ -171,16 +175,19 @@ class ResidualDetailPredictor(nn.Module):
 class PCAModel():
     """PCA模型，包含训练和逆变换"""
     
-    def __init__(self, pca_components_freeze, pca_mean=None, device='cuda'):
+    def __init__(self, pca_components_freeze, pca_mean=None, freeze_pca=False, device='cuda'):
         # from sklearn.decomposition import PCA
         # self.pca = PCA(n_components=n_components)
+        self.freeze_pca = freeze_pca
         self.pca_components_freeze = torch.tensor(pca_components_freeze, dtype=torch.bfloat16).to(device)  # [3, 16]
         # 如果没有提供pca_mean，则默认为零向量
+        self.pca_components_shape = self.pca_components_freeze.shape
         if pca_mean is not None:
             pca_mean = nn.Parameter(torch.tensor(pca_mean, dtype=torch.bfloat16).to(device))   # [16]
         else:
             pca_mean = nn.Parameter(torch.ones(16, dtype=torch.bfloat16, device=device) * 0.004)   # [16]
         self.pca_mean = pca_mean  # [16]
+        self.pca_mean_shape = self.pca_mean.shape
         
         # 初始化增量参数
         self.pca_components_delta = nn.Parameter(torch.randn_like(self.pca_components_freeze) * 0.001)  # [3, 16]
@@ -192,6 +199,9 @@ class PCAModel():
         self.pca_components = self.pca_components_freeze + self.pca_components_delta  # 初始PCA组件
         
         self.device = device
+        
+        if self.freeze_pca:
+            self.eval()
     
     def eval(self):
         self.pca_components_delta.requires_grad = False
@@ -218,14 +228,14 @@ class PCAModel():
 class PCAPipeline:
     """完整的PCA预测Pipeline"""
     
-    def __init__(self, vae, pca_model, residual_detail=False, device='cuda'):
+    def __init__(self, vae, pca_model, high_freq_enable=False, residual_detail=False, n_channels=16, device='cuda'):
         self.vae = vae
         self.pca_model = pca_model
         self.device = device
         
         self.residual_detail = residual_detail
         if self.residual_detail:
-            self.residual_detail_predictor = ResidualDetailPredictor().to(device).bfloat16()
+            self.residual_detail_predictor = ResidualDetailPredictor(output_channels=n_channels).to(device).bfloat16()
         
         # 冻结VAE组件
         if vae:
@@ -236,63 +246,65 @@ class PCAPipeline:
             
         # 初始化PCA预测器
         # self.pca_predictor = PCAPredictor().to(device).bfloat16()
-        self.pca_predictor = ColorAwarePCAPredictor().to(device).bfloat16()
+        self.pca_predictor = ColorAwarePCAPredictor(high_freq_enable=high_freq_enable).to(device).bfloat16()
         
-    def pca_transform_batch(self, z):
+    def pca_transform_batch(self, z, n_components=3, n_channels=16):
         """批量进行PCA变换"""
         batch_size, c, h, w = z.shape
-        
         # 重塑为 [batch_size * h * w, 16]
-        z_flat = z.permute(0, 2, 3, 1).reshape(-1, 16)
+        z_flat = z.permute(0, 2, 3, 1).reshape(-1, n_channels)
         
         # PCA变换
         z_pca_flat = self.pca_model.transform(z_flat)
         
         # 重塑回 [batch_size, 3, h, w]
-        z_pca = z_pca_flat.reshape(batch_size, h, w, 3).permute(0, 3, 1, 2)
+        z_pca = z_pca_flat.reshape(batch_size, h, w, n_components).permute(0, 3, 1, 2)
         return z_pca
         
-    def pca_inverse_transform_batch(self, z_pca):
+    def pca_inverse_transform_batch(self, z_pca, n_components=3, n_channels=16):
         """批量进行PCA逆变换"""
         batch_size, c, h, w = z_pca.shape
         
         # 重塑为 [batch_size * h * w, 3]
-        z_pca_flat = z_pca.permute(0, 2, 3, 1).reshape(-1, 3)
+        z_pca_flat = z_pca.permute(0, 2, 3, 1).reshape(-1, n_components)
         
         # PCA逆变换
         z_flat = self.pca_model.inverse_transform(z_pca_flat)
         
         # 重塑回 [batch_size, 16, h, w]
-        z_reconstructed = z_flat.reshape(batch_size, h, w, 16).permute(0, 3, 1, 2)
+        z_reconstructed = z_flat.reshape(batch_size, h, w, n_channels).permute(0, 3, 1, 2)
         return z_reconstructed
     
-    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator):
+    def _encode_vae_image(self, image: torch.Tensor, generator: torch.Generator, sample_mode="sample"):
         from diffusers.pipelines.flux.pipeline_flux_img2img import retrieve_latents
-
-        if isinstance(generator, list):
-            image_latents = [
-                retrieve_latents(
-                    self.vae.encode(image[i : i + 1]), generator=generator[i]
+        if sample_mode == "sample":
+            if isinstance(generator, list):
+                image_latents = [
+                    retrieve_latents(
+                        self.vae.encode(image[i : i + 1]), generator=generator[i]
+                    )
+                    for i in range(image.shape[0])
+                ]
+                image_latents = torch.cat(image_latents, dim=0)
+            else:
+                image_latents = retrieve_latents(
+                    self.vae.encode(image), generator=generator
                 )
-                for i in range(image.shape[0])
-            ]
-            image_latents = torch.cat(image_latents, dim=0)
+        if self.vae.config.shift_factor:
+            image_latents = (
+                image_latents - self.vae.config.shift_factor
+            ) * self.vae.config.scaling_factor
         else:
-            image_latents = retrieve_latents(
-                self.vae.encode(image), generator=generator
-            )
-
-        image_latents = (
-            image_latents - self.vae.config.shift_factor
-        ) * self.vae.config.scaling_factor
-
+            image_latents = image_latents * self.vae.config.scaling_factor
         return image_latents
     
-    def _decode_vae_latents(self, z_pred: torch.Tensor, do_normalize=True):
-        
-        latents = (
-                z_pred / self.vae.config.scaling_factor
-            ) + self.vae.config.shift_factor
+    def _decode_vae_latents(self, z_pred: torch.Tensor, do_normalize=False):
+        if self.vae.config.shift_factor:
+            latents = (
+                    z_pred / self.vae.config.scaling_factor
+                ) + self.vae.config.shift_factor
+        else:
+            latents = z_pred / self.vae.config.scaling_factor
         images = self.vae.decode(latents, return_dict=False)[0]
 
         if do_normalize:
@@ -393,17 +405,21 @@ class PCAPipeline:
         return z_x, z_pca_pred, z_pred
         
     def eval(self):
+        if self.vae:
+            self.vae.eval()
         self.pca_predictor.eval()
-        self.residual_detail_predictor.eval()
-        self.pca_model.eval()
+        if self.residual_detail:
+            self.residual_detail_predictor.eval()
+        if self.pca_model:
+            self.pca_model.eval()
         
-    def generate_for_comparsion(self, x, generator=None, x_recon=False):
+    def generate_for_comparsion(self, x, n_components=16, n_channels=16,generator=None, x_recon=False):
         """生成重建图像"""
         self.pca_predictor.eval()
         
         with torch.no_grad():
             z_pca_pred = self.pca_predictor(x)
-            z_pred = self.pca_inverse_transform_batch(z_pca_pred)
+            z_pred = self.pca_inverse_transform_batch(z_pca_pred, n_components=n_components, n_channels=n_channels)
             if self.residual_detail:
                 self.residual_detail_predictor.eval()
                 from utils import rgb_color_gradient
@@ -413,13 +429,21 @@ class PCAPipeline:
             pca_recon = self._decode_vae_latents(z_pred)  # [batch, 3, H, W]
             
             if x_recon:
-                z_x = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
-                z_x_pca = self.pca_transform_batch(z_x)  # [batch, 3, H/8, W/8]
-                z_x_pca_inverse = self.pca_inverse_transform_batch(z_x_pca)  # [batch, 16, H/8, W/8]
-                x_recon = self._decode_vae_latents(z_x_pca_inverse)  # [batch, 3, H, W]
+                x_recon = self.pca_reconstruction(x, n_components=n_components, n_channels=n_channels)
             
         return pca_recon, z_pca_pred, x_recon
-    
+    def pca_reconstruction(self, x, generator=None, n_components=3, n_channels=16, do_normalize=False):
+        z_x = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
+        z_x_pca = self.pca_transform_batch(z_x,n_components=n_components, n_channels=n_channels)  # [batch, 3, H/8, W/8]
+        z_x_pca_inverse = self.pca_inverse_transform_batch(z_x_pca, n_components=n_components, n_channels=n_channels)  # [batch, 16, H/8, W/8]
+        x_recon = self._decode_vae_latents(z_x_pca_inverse, do_normalize)  # [batch, 3, H, W]
+        return x_recon
+    def latent_reconstruction(self, x, generator=None):
+        """生成重建图像"""
+        z_x = self._encode_vae_image(x, generator)
+        x_recon = self._decode_vae_latents(z_x)
+        return x_recon
+        
     def save(self, path):
         """保存模型"""
         torch.save({

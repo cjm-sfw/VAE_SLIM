@@ -16,6 +16,8 @@ from diffusers import (
     GGUFQuantizationConfig,
     AutoencoderKL
 )
+from dotenv import load_dotenv
+load_dotenv()
 from utils import visualize_spectrum_comparison, radial_profile, rgb_grad_map, rgb_grad_comparison
 
 import os
@@ -41,7 +43,7 @@ print("loading vae from:", model_path)
 # )
 
 vae = AutoencoderKL.from_pretrained(
-    "black-forest-labs/FLUX.1-dev",
+    model_path,
     subfolder="vae",
     torch_dtype=torch.bfloat16,
     cache_dir=cache_dir,
@@ -366,6 +368,6 @@ pipe = train_pca_pipeline(vae, pca_model, train_loader,generator, residual_detai
 ckpt_path = save_dir + f"pca_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
 pipe.save(ckpt_path)
 
-pipe = train_pca_pipeline(vae, pca_model, train_loader,generator, residual_detail=True, stage=2, device='cuda')
+pipe = train_pca_pipeline(vae, pca_model, train_loader,generator, residual_detail=True, stage=2, device='cuda', ckpt=ckpt_path)
 ckpt_path = save_dir +  f"pca_pipeline_{datetime.now().strftime('%Y%m%d_%H%M%S')}.pth"
 pipe.save(ckpt_path)
