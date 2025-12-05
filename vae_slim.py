@@ -175,17 +175,18 @@ class ResidualDetailPredictor(nn.Module):
 class PCAModel():
     """PCA模型，包含训练和逆变换"""
     
-    def __init__(self, pca_components_freeze, pca_mean=None, freeze_pca=False, device='cuda'):
+    def __init__(self, pca_components_freeze, pca_mean=None, freeze_pca=False, device='cuda', dtype=torch.bfloat16):
         # from sklearn.decomposition import PCA
         # self.pca = PCA(n_components=n_components)
+        self.dtype = dtype
         self.freeze_pca = freeze_pca
-        self.pca_components_freeze = torch.tensor(pca_components_freeze, dtype=torch.bfloat16).to(device)  # [3, 16]
+        self.pca_components_freeze = torch.tensor(pca_components_freeze, dtype=self.dtype).to(device)  # [3, 16]
         # 如果没有提供pca_mean，则默认为零向量
         self.pca_components_shape = self.pca_components_freeze.shape
         if pca_mean is not None:
-            pca_mean = nn.Parameter(torch.tensor(pca_mean, dtype=torch.bfloat16).to(device))   # [16]
+            pca_mean = nn.Parameter(torch.tensor(pca_mean, dtype=self.dtype).to(device))   # [16]
         else:
-            pca_mean = nn.Parameter(torch.ones(16, dtype=torch.bfloat16, device=device) * 0.004)   # [16]
+            pca_mean = nn.Parameter(torch.ones(16, dtype=self.dtype, device=device) * 0.004)   # [16]
         self.pca_mean = pca_mean  # [16]
         self.pca_mean_shape = self.pca_mean.shape
         
@@ -228,14 +229,15 @@ class PCAModel():
 class PCAPipeline:
     """完整的PCA预测Pipeline"""
     
-    def __init__(self, vae, pca_model, high_freq_enable=False, residual_detail=False, n_channels=16, device='cuda'):
+    def __init__(self, vae, pca_model, high_freq_enable=False, residual_detail=False, n_channels=16, device='cuda',dtype=torch.bfloat16):
         self.vae = vae
         self.pca_model = pca_model
         self.device = device
+        self.dtype = dtype
         
         self.residual_detail = residual_detail
         if self.residual_detail:
-            self.residual_detail_predictor = ResidualDetailPredictor(output_channels=n_channels).to(device).bfloat16()
+            self.residual_detail_predictor = ResidualDetailPredictor(output_channels=n_channels).to(device=device, dtype=dtype)
         
         # 冻结VAE组件
         if vae:
@@ -246,7 +248,7 @@ class PCAPipeline:
             
         # 初始化PCA预测器
         # self.pca_predictor = PCAPredictor().to(device).bfloat16()
-        self.pca_predictor = ColorAwarePCAPredictor(high_freq_enable=high_freq_enable).to(device).bfloat16()
+        self.pca_predictor = ColorAwarePCAPredictor(high_freq_enable=high_freq_enable).to(device=device, dtype=dtype)
         
     def pca_transform_batch(self, z, n_components=3, n_channels=16):
         """批量进行PCA变换"""
@@ -290,6 +292,23 @@ class PCAPipeline:
                 image_latents = retrieve_latents(
                     self.vae.encode(image), generator=generator
                 )
+        elif sample_mode == "mean":
+            def get_mean_latents(image):
+                h = self.vae._encode(image)
+                latent_mean = h[:, :16, :, :]  # 假设前16个通道是潜变量
+                return latent_mean
+            
+            if isinstance(generator, list):
+                image_latents = [
+                    retrieve_latents(
+                        self.vae.encode(image[i : i + 1]), generator=generator[i]
+                    )
+                    for i in range(image.shape[0])
+                ]
+                image_latents = torch.cat(image_latents, dim=0)
+            else:
+                image_latents = get_mean_latents(image)
+                
         if self.vae.config.shift_factor:
             image_latents = (
                 image_latents - self.vae.config.shift_factor
@@ -324,7 +343,7 @@ class PCAPipeline:
         with torch.no_grad():
             z_true = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
             z_pca_true = self.pca_transform_batch(z_true)  # [batch, 3, H/8, W/8]
-            z_pca_true = z_pca_true.bfloat16().to(self.device)  # 确保在正确的设备上
+            z_pca_true = z_pca_true.to(device=self.device, dtype=self.dtype)  # 确保在正确的设备上
         
         # PCA预测器前向传播
         z_pca_pred = self.pca_predictor(x) # [batch, 3, H/8, W/8]
@@ -363,7 +382,7 @@ class PCAPipeline:
         with torch.no_grad():
             z_true = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
             z_pca_true = self.pca_transform_batch(z_true)  # [batch, 3, H/8, W/8]
-            z_pca_true = z_pca_true.bfloat16().to(self.device)  # 确保在正确的设备上
+            z_pca_true = z_pca_true.to(device=self.device, dtype=self.dtype)  # 确保在正确的设备上
         
         # PCA预测器前向传播
         z_pca_pred = self.pca_predictor(x)  # [batch, 3, H/8, W/8]
@@ -423,7 +442,7 @@ class PCAPipeline:
             if self.residual_detail:
                 self.residual_detail_predictor.eval()
                 from utils import rgb_color_gradient
-                x_grad = rgb_color_gradient(x, method='sobel', return_magnitude=True, normalized=True, dtype=torch.bfloat16)  # [batch, 3, H, W]
+                x_grad = rgb_color_gradient(x, method='sobel', return_magnitude=True, normalized=True, dtype=self.dtype)  # [batch, 3, H, W]
                 residual_detail_pred = self.residual_detail_predictor(x_grad)  # [batch, 16, H/8, W/8]
                 z_pred += residual_detail_pred  # 将残差细节添加到潜变量中
             pca_recon = self._decode_vae_latents(z_pred)  # [batch, 3, H, W]
@@ -432,6 +451,57 @@ class PCAPipeline:
                 x_recon = self.pca_reconstruction(x, n_components=n_components, n_channels=n_channels)
             
         return pca_recon, z_pca_pred, x_recon
+    
+    def pca_analysis(self, x, generator=None, n_components=16, n_channels=16, do_normalize=False):
+        """PCA分析"""
+        z_x = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
+        z_x_pca = self.pca_transform_batch(z_x,n_components=n_components, n_channels=n_channels)  # [batch, 3, H/8, W/8]
+        z_x_pca_inverse = self.pca_inverse_transform_batch(z_x_pca, n_components=n_components, n_channels=n_channels)  # [batch, 16, H/8, W/8]
+        x_recon = self._decode_vae_latents(z_x_pca_inverse, do_normalize)  # [batch, 3, H, W]
+        
+        import torch
+        # 假设 z_x, z_x_pca_inverse 的 shape 是 (N, C, ...) 或 (N, D) 且在 cuda:0
+        z1 = z_x.detach().to(torch.float32)
+        z2 = z_x_pca_inverse.detach().to(torch.float32)
+
+        # 基本统计
+        mean1 = z1.mean().item()
+        std1  = z1.std().item()
+        mean2 = z2.mean().item()
+        std2  = z2.std().item()
+        print("mean/std z1:", mean1, std1)
+        print("mean/std z2:", mean2, std2)
+
+        # 全局 MSE & 相对 MSE (相对于 z 的能量)
+        mse = torch.mean((z1 - z2)**2).item()
+        energy = torch.mean(z1**2).item()
+        rel_mse = mse / (energy + 1e-12)
+        print("mse:", mse, "energy:", energy, "relative_mse:", rel_mse)
+
+        # L2 比率与余弦相似度
+        l2_diff = (z1 - z2).permute(0, 2, 3, 1).reshape(-1, n_channels)  # reshape to (N, C)
+        l2_diff = torch.norm(l2_diff, dim=1) # per-sample
+        l2_z1   = torch.norm(z1.permute(0, 2, 3, 1).reshape(-1, n_channels), dim=1)
+        l2_ratio = l2_diff / (l2_z1 + 1e-12)
+        cos_sim = torch.nn.functional.cosine_similarity(z1.permute(0, 2, 3, 1).reshape(-1, n_channels), z2.permute(0, 2, 3, 1).reshape(-1, n_channels), dim=1).mean().item()
+        print("mean per-sample L2 ratio:", l2_ratio, "mean cosine sim:", cos_sim)
+
+        # per-channel mse（若 shape (N, C, ...)）
+        # if z1.dim() >= 2:
+        #     # collapse spatial dims
+        #     z1_flat = z1.view(z1.shape[0], z1.shape[1], -1).mean(dim=2)  # (N,C)
+        #     z2_flat = z2.view(z2.shape[0], z2.shape[1], -1).mean(dim=2)
+        #     per_channel_mse = torch.mean((z1_flat - z2_flat)**2, dim=0)  # (C,)
+        #     print("per-channel mse:", per_channel_mse.cpu().numpy())
+
+        # bfloat16 -> float32 比较（检验精度影响）
+        z1_bf = z_x.clone().to(torch.float32)
+        z2_bf = z_x_pca_inverse.clone().to(torch.float32)
+        print("mse (float32):", torch.mean((z1_bf.to(torch.float32)-z2_bf.to(torch.float32))**2).item())
+
+        
+        return x_recon
+    
     def pca_reconstruction(self, x, generator=None, n_components=3, n_channels=16, do_normalize=False):
         z_x = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
         z_x_pca = self.pca_transform_batch(z_x,n_components=n_components, n_channels=n_channels)  # [batch, 3, H/8, W/8]

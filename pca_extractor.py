@@ -8,15 +8,15 @@ from vae_slim import PCAPipeline, PCAModel
 from huggingface_hub import login
 from diffusers.models.autoencoders.autoencoder_kl import AutoencoderKL
 from sklearn.decomposition import PCA
-from dataloader import image_dataloader
+from dataloader import image_dataloader, ImageNetDataloader
 from PIL import Image
 from tqdm import tqdm
-from utils import plot_images
+from utils import plot_images, plot_each_channel_figure_list, plot_image, save_image
 # env
 from dotenv import load_dotenv
 load_dotenv()
 
-def load_vae(model_path = "black-forest-labs/FLUX.1-dev"):
+def load_vae(model_path = "black-forest-labs/FLUX.1-dev", dtype=torch.bfloat16):
     # model_path = ""
     Token = os.getenv("HUGGINGFACE_TOKEN", "")
     cache_dir = os.getenv("HF_CACHE_DIR", "/root/autodl-tmp/cache_dir/huggingface/hub/")
@@ -34,7 +34,7 @@ def load_vae(model_path = "black-forest-labs/FLUX.1-dev"):
     vae = AutoencoderKL.from_pretrained(
         model_path,
         subfolder="vae",
-        torch_dtype=torch.bfloat16,
+        torch_dtype=dtype,
         cache_dir=cache_dir,
         proxies={'http': '127.0.0.1:7890'}
     )
@@ -51,19 +51,26 @@ def load_pca_model(n_components = 16):
     pca = PCA(n_components=n_components)
     return pca
 
-def load_dataloader(data_dir="train_images", batch_size=4):
-    train_loader = image_dataloader(
-        data_dir=data_dir,
-        batch_size=batch_size,  # 根据你的显存大小调整
-        shuffle=True,
-        num_workers=4  # 根据需要调整
-    )
+def load_dataloader(data_dir="train_images", dataset_type="imagenet", batch_size=4, shuffle=True, num_workers=0):
+    if dataset_type == "images":
+        train_loader = image_dataloader(
+            data_dir=data_dir,
+            batch_size=batch_size,  # 根据你的显存大小调整
+            shuffle=shuffle,
+            num_workers=num_workers  # 根据需要调整
+        )
+    elif dataset_type == "imagenet":
+        from dataloader import get_imagenet_dataset
+        dataset = get_imagenet_dataset(split="test")
+        train_loader = ImageNetDataloader(
+            dataset=dataset,
+            batch_size=batch_size,  # 根据你的显存大小调整
+            shuffle=shuffle,
+            num_workers=num_workers  # 根据需要调整
+        )
     return train_loader
 
-generator=torch.manual_seed(int(42))
 
-device = "cuda" if torch.cuda.is_available() else "cpu"
-print(f"device: {device}")
 
 def get_rgb_case(rgb_case_add = "/workspace/VAE_SLIM/input_cases/RGB.png"):
     rgb_case = torch.tensor(np.array(Image.open(rgb_case_add))).to(device).bfloat16()
@@ -126,7 +133,8 @@ def get_full_channel_pca_model_from_rgb(model_path="black-forest-labs/FLUX.1-dev
                                         n_channels = 16,
                                         rgb_case_add = "/workspace/VAE_SLIM/input_cases/RGB.png",
                                         save_dir="/workspace/VAE_SLIM/",
-                                        prefix="full_channel"):
+                                        prefix="full_channel",
+                                        dtype=torch.bfloat16):
     pca = load_pca_model(n_components)
     rgb_case = get_rgb_case(rgb_case_add)
     vae = load_vae(model_path)
@@ -147,7 +155,7 @@ def get_full_channel_pca_model_from_rgb(model_path="black-forest-labs/FLUX.1-dev
     print("explained variance ratio:", pca.explained_variance_ratio_)
 
     save_pca_to_csv(reduced_data=reduced_data, pca_components=pca_components, pca_mean=pca_mean, prefix=prefix)
-    visualize_reduced_data_and_rgb(reduced_data=reduced_data, rgb=rgb_case.float(), data_shape=(b, c, h, w), save_dir=save_dir, prefix=prefix)
+    visualize_reduced_data_and_rgb(reduced_data=reduced_data, rgb=rgb_case.float(), data_shape=(b, c, h, w), save_dir=save_dir + "vis/", prefix=prefix)
 
 def build_recon_image(pipe, test_batch, generator, n_components=16, n_channels=16):
     pca_recon = pipe.pca_reconstruction(test_batch, generator, n_components=n_components, n_channels=n_channels)
@@ -155,15 +163,20 @@ def build_recon_image(pipe, test_batch, generator, n_components=16, n_channels=1
     # import pdb;pdb.set_trace()
     plot_images([test_batch[0].float().cpu(), x_recon[0].float().detach().cpu(), pca_recon[0].float().detach().cpu()], ncols=3, save_path=f"vis/pca_recon_{n_components}.png")
 
-def build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", n_components=16, n_channels=16, save_dir="/workspace/VAE_SLIM/", prefix="full_channel"):
+def build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", 
+                                  n_components=16, 
+                                  n_channels=16, 
+                                  save_dir="/workspace/VAE_SLIM/", 
+                                  prefix="full_channel", 
+                                  dataset_type="imagenet"):
     vae = load_vae(model_path)
     full_pca_components = np.load(save_dir + prefix + "_pca_components.npy")
     full_pca_mean = np.load(save_dir + prefix + "_pca_mean.npy")
     
     n_range = [i for i in range(1, n_components+1)]
 
-    train_loader = load_dataloader(batch_size=1)
-    test_batch = next(iter(train_loader)).to(device).bfloat16()
+    train_loader = load_dataloader(batch_size=1, dataset_type=dataset_type)
+    test_batch = next(iter(train_loader))['pixel_values'].to(device).bfloat16()
 
     image_list = []
     title_list = []
@@ -190,39 +203,63 @@ def build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", n_c
         title_list.append(f"n={n}")
         
         if n != 1: 
-            diff_list.append(pca_recon - image_list[-2])
-            norm_diff_list.append(diff_list[-1] / diff_list[-1].max())
-            diff_title_list.append(f"individual diff n={n}")
-            norm_diff_title_list.append(f"individual norm diff n={n}")
+            dist = pca_recon - image_list[-2]
+            diff_list.append(dist)
+        else:
+            diff_list.append(pca_recon)
+        
+        norm_diff_list.append((diff_list[-1] - diff_list[-1].min()) / (diff_list[-1].max() - diff_list[-1].min()))
+        diff_title_list.append(f"individual diff n={n}")
+        norm_diff_title_list.append(f"individual norm diff n={n}")
 
     image_list.append(test_batch[0].float().cpu())
     title_list.append("original")
 
     plot_images(image_list, title_list, save_path=f"vis/{prefix}_pca_recon_diff_n_components.png")
     plot_images(diff_list, diff_title_list, save_path=f"vis/{prefix}_pca_recon_diff_n_components_diff.png")
+    plot_each_channel_figure_list(diff_list, ncols=4, save_path=f"vis/{prefix}_pca_recon_diff_n_components_each_channel.png")
     plot_images(norm_diff_list, norm_diff_title_list, save_path=f"vis/{prefix}_pca_recon_diff_n_components_norm_diff.png")
+    plot_each_channel_figure_list(norm_diff_list, ncols=4, save_path=f"vis/{prefix}_pca_recon_diff_n_components_each_channel_norm_diff.png")
     
-get_full_channel_pca_model_from_rgb(model_path="sd-legacy/stable-diffusion-v1-5", 
-                                    n_components=4, 
-                                    n_channels=4, 
-                                    # rgb_case_add="/workspace/VAE_SLIM/train_images/image_0_0.png",
-                                    prefix="sd_full_channel"
-                                    )
-# build_diff_n_components_image(model_path="sd-legacy/stable-diffusion-v1-5", 
-#                               n_components=4, 
-#                               n_channels=4,
-#                               prefix="sd_full_channel")
+    for image_index in range(len(image_list)):
+        save_image(f'vis/image_{image_index}.png', image_list[image_index].float().cpu().detach())
+    
+    for norm_diff_index in range(len(norm_diff_list)):
+        save_image(f'vis/norm_diff_image_{norm_diff_index}.png', norm_diff_list[norm_diff_index].float().cpu().detach())
+        
+    for diff_index in range(len(diff_list)):
+        save_image(f'vis/diff_image_{diff_index}.png', diff_list[diff_index].float().cpu().detach())
+  
 
-# get_full_channel_pca_model_from_rgb(model_path="black-forest-labs/FLUX.1-dev", 
-#                                     n_components=3, 
-#                                     n_channels=16, 
-#                                     # rgb_case_add="/workspace/VAE_SLIM/train_images/image_0_0.png",
-#                                     prefix="flux_full_channel"
-#                                     )
-# build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", 
-#                               n_components=16, 
-#                               n_channels=16, 
-#                               prefix="flux_full_channel")
+generator=torch.manual_seed(int(torch.randn(1).item()))
+
+device = "cuda" if torch.cuda.is_available() else "cpu"
+print(f"device: {device}")
+
+if __name__ == "__main__":
+    get_full_channel_pca_model_from_rgb(model_path="sd-legacy/stable-diffusion-v1-5", 
+                                        n_components=4, 
+                                        n_channels=4, 
+                                        rgb_case_add="/workspace/VAE_SLIM/input_cases/cases.png",
+                                        prefix="sd_full_channel"
+                                        )
+    build_diff_n_components_image(model_path="sd-legacy/stable-diffusion-v1-5", 
+                                  n_components=4, 
+                                  n_channels=4,
+                                  prefix="sd_full_channel")
+
+    # get_full_channel_pca_model_from_rgb(model_path="black-forest-labs/FLUX.1-dev", 
+    #                                     n_components=16, 
+    #                                     n_channels=16, 
+    #                                     rgb_case_add="/workspace/VAE_SLIM/input_cases/cases.png",
+    #                                     prefix="flux_full_channel",
+    #                                     dtype=torch.bfloat16
+    #                                     )
+
+    # build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", 
+    #                               n_components=16, 
+    #                               n_channels=16, 
+    #                               prefix="flux_full_channel")
 
         
 

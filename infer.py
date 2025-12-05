@@ -8,8 +8,6 @@ from vae_slim import PCAPipeline, PCAModel
 
 from huggingface_hub import login
 from diffusers import (
-    FluxTransformer2DModel,
-    GGUFQuantizationConfig,
     AutoencoderKL
 )
 

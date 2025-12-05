@@ -8,5 +8,5 @@
 /eval_images
 .env
 *.npy
-*.png
 .locks/
+/output

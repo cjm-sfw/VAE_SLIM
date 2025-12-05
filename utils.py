@@ -387,6 +387,39 @@ def log_training_progress(writer, images, reconstructions, epoch):
     writer.add_images('Training/Input_Images', images[:8], epoch)
     writer.add_images('Training/Reconstructed_Images', reconstructions[:8], epoch)
     
+def plot_image(image, title=None, save_path=None):
+    """
+    绘制单张图像
+    Args:
+        image: 输入图像 tensor [C, H, W] 或 [B, C, H, W]
+        title: 图像标题
+        save_path: 保存路径，如果为None则显示图像
+    """
+    if image.dim() == 3:
+        image = image.unsqueeze(0)  # 添加batch维度
+    
+    plt.figure(figsize=(8, 8))
+    plt.imshow(image[0].permute(1, 2, 0).cpu().numpy())
+    if title:
+        plt.title(title)
+    plt.axis('off')
+    
+    if save_path:
+        plt.savefig(save_path)
+    else:
+        plt.show()
+    
+    plt.close()
+    
+def save_image(save_path, image):
+    """保存单张图像"""
+    image = image.cpu().numpy().transpose(1, 2, 0)
+    image = np.clip(image, 0, 1)
+    image = (image * 255).astype(np.uint8)
+    # convert to RGB
+    image = cv2.cvtColor(image, cv2.COLOR_RGB2BGR)
+    cv2.imwrite(save_path, image)
+    return image
 
 def plot_images(images, titles=None, ncols=4, save_path=None):
     nrows = (len(images) + ncols - 1) // ncols
@@ -407,6 +440,33 @@ def plot_images(images, titles=None, ncols=4, save_path=None):
     if save_path:
         plt.savefig(save_path)
     plt.close()
+    
+def plot_each_channel_figure_list(tensor_list, ncols=4 ,save_path=None):
+    """
+    输入一个列表，列表中的每个元素是一个张量，张量的维度为[3, H, W]
+    对于每个张量，分别绘制三个通道的图像，带有标题和色值条
+    ncols: 图像的列数
+    """
+    tensor_list = [tensor.cpu() for tensor in tensor_list]
+    n = len(tensor_list)
+    fig, axs = plt.subplots(nrows=(n + ncols - 1) // ncols, ncols=ncols * 3, figsize=(ncols*15, 5 * ((n + ncols - 1) // ncols)))
+    axs = axs.flatten()
+    
+    for i, tensor in enumerate(tensor_list):
+        for j in range(3):
+            axs[i * 3 + j].imshow(tensor[j].cpu().numpy())
+            axs[i * 3 + j].set_title(f'Individual {i}, Channel {j+1}')
+            axs[i * 3 + j].axis('off')
+            
+            # 添加色值条
+            cbar = plt.colorbar(axs[i * 3 + j].images[0], ax=axs[i * 3 + j], fraction=0.046, pad=0.04)
+            cbar.ax.tick_params(labelsize=8)
+            cbar.ax.set_title('Value', fontsize=8)
+    
+    plt.tight_layout()
+    plt.show()
+    if save_path:
+        plt.savefig(save_path)
     
 def plot_figure(tensor, save_path=None):
     # tensor: [B, C, H, W]

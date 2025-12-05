@@ -186,21 +186,31 @@ def create_pipeline(vae, pca_model, residual_detail, device, args):
     return pipeline
 
 
-def create_data_loaders(train_data_dir, eval_data_dir, train_batch_size, eval_batch_size, num_workers):
+def create_data_loaders(train_data_dir, eval_data_dir, train_batch_size, eval_batch_size, num_workers, dataset_type):
     """Create train and eval data loaders with configurable parameters"""
-    train_loader = image_dataloader(
-        data_dir=train_data_dir,
-        batch_size=train_batch_size,
-        shuffle=True,
-        num_workers=num_workers
-    )
-    
-    eval_loader = image_dataloader(
-        data_dir=eval_data_dir,
-        batch_size=eval_batch_size,
-        shuffle=False,
-        num_workers=0
-    )
+    if dataset_type == "imagenet":
+        from .dataloader import ImageNetDataloader, load_dataset
+        train_dataset = load_dataset(train_data_dir, split="train")
+        eval_dataset = load_dataset(eval_data_dir, split="test") # "benjamin-paine/imagenet-1k-256x256"
+        
+        train_loader = ImageNetDataloader(train_dataset, batch_size=train_batch_size, shuffle=True, num_workers=num_workers)
+        eval_loader = ImageNetDataloader(eval_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers)
+        
+    else:
+        train_loader = image_dataloader(
+            data_dir=train_data_dir,
+            batch_size=train_batch_size,
+            shuffle=True,
+            num_workers=num_workers
+        )
+        
+        eval_loader = image_dataloader(
+            data_dir=eval_data_dir,
+            batch_size=eval_batch_size,
+            shuffle=False,
+            num_workers=0
+        )
+
     
     return train_loader, eval_loader
 
