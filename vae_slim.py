@@ -328,7 +328,7 @@ class PCAPipeline:
 
         if do_normalize:
             # 归一化到[0, 1]
-            images = (images - images.min()) / (images.max() - images.min())
+            images = (images + 1) / 2
 
         return images
     
@@ -503,15 +503,19 @@ class PCAPipeline:
         return x_recon
     
     def pca_reconstruction(self, x, generator=None, n_components=3, n_channels=16, do_normalize=False):
+        if do_normalize:
+            x = x * 2 - 1  # 将图像归一化到[-1, 1]
         z_x = self._encode_vae_image(x, generator)  # [batch, 16, H/8, W/8]
         z_x_pca = self.pca_transform_batch(z_x,n_components=n_components, n_channels=n_channels)  # [batch, 3, H/8, W/8]
         z_x_pca_inverse = self.pca_inverse_transform_batch(z_x_pca, n_components=n_components, n_channels=n_channels)  # [batch, 16, H/8, W/8]
         x_recon = self._decode_vae_latents(z_x_pca_inverse, do_normalize)  # [batch, 3, H, W]
         return x_recon
-    def latent_reconstruction(self, x, generator=None):
+    def latent_reconstruction(self, x, generator=None, do_normalize=False):
         """生成重建图像"""
+        if do_normalize:
+            x = x * 2 - 1  # 将图像归一化到[-1, 1]
         z_x = self._encode_vae_image(x, generator)
-        x_recon = self._decode_vae_latents(z_x)
+        x_recon = self._decode_vae_latents(z_x, do_normalize)
         return x_recon
         
     def save(self, path):

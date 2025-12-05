@@ -296,13 +296,13 @@ def main_evaluation_pipeline(prefix="test", device='cuda', batch_size=32, n_batc
             with torch.no_grad():
                 # import pdb;pdb.set_trace()
                 latents = pipe._encode_vae_image(original_images.to(dtype), generator)
-                reconstructed_images = pipe._decode_vae_latents(latents, generator).float().detach().cpu()
+                reconstructed_images = pipe._decode_vae_latents(latents).float().detach().cpu()
                 reconstructed_images= torch.clip(reconstructed_images, 0, 1)
         
         elif prefix == "Flux_VAE_mean_sample/":
             with torch.no_grad():
                 latents = pipe._encode_vae_image(original_images.to(dtype), generator, sample_mode="mean")
-                reconstructed_images = pipe._decode_vae_latents(latents, generator).float().detach().cpu()
+                reconstructed_images = pipe._decode_vae_latents(latents).float().detach().cpu()
                 reconstructed_images= torch.clip(reconstructed_images, 0, 1)
             
         elif "Flux_VAE_pca" in prefix:
@@ -379,14 +379,16 @@ def get_results(prefix="test", batch_size=32, n_batches=10, save_result=True, cl
 
 if __name__ == "__main__":
     # 运行评估
-    # prefix = "SD_1_5_VAE_original"
-    # prefix = "Flux_VAE_original"
+    prefix = "SD_1_5_VAE_original"
+    get_results(prefix=prefix, batch_size=32, n_batches=157, save_result=True, cleanup=True, dtype=torch.bfloat16)
+    
+    prefix = "Flux_VAE_original"
     # prefix = "Flux_VAE_pca_16"
-    prefix = "SD_1_5_VAE_pca_4"
+    # prefix = "SD_1_5_VAE_pca_4"
     
     # prefix = "Flux_VAE_mean_sample"
     
-    get_results(prefix=prefix, batch_size=32, n_batches=157, save_result=False, cleanup=True, dtype=torch.float32)
+    get_results(prefix=prefix, batch_size=32, n_batches=157, save_result=True, cleanup=True, dtype=torch.bfloat16)
     
     # _prefix = "Flux_VAE_pca_"
     # for i in range(16, 17):
