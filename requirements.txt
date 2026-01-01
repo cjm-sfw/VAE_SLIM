@@ -16,3 +16,4 @@ torchmetrics
 lpips
 pillow
 clean-fid
+dotenv

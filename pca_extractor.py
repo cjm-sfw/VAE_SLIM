@@ -78,7 +78,7 @@ def get_rgb_case(rgb_case_add = "/workspace/VAE_SLIM/input_cases/RGB.png"):
     rgb_case = rgb_case.permute(2, 0, 1).unsqueeze(0)
     return rgb_case
 
-def save_pca_to_csv(reduced_data, pca_components, pca_mean, save_dir="/workspace/VAE_SLIM/", prefix="full_channel"):
+def save_pca_to_csv(reduced_data, pca_components, pca_mean, save_dir="/workspace/VAE_SLIM/vis/", prefix="full_channel"):
     # save to csv
     full_channel_pca_reduced_data_add = f"{save_dir}/{prefix}_pca_reduced_data.npy"
     full_channel_pca_components_add = f"{save_dir}/{prefix}_pca_components.npy"
@@ -237,29 +237,30 @@ device = "cuda" if torch.cuda.is_available() else "cpu"
 print(f"device: {device}")
 
 if __name__ == "__main__":
-    get_full_channel_pca_model_from_rgb(model_path="sd-legacy/stable-diffusion-v1-5", 
-                                        n_components=4, 
-                                        n_channels=4, 
-                                        rgb_case_add="/workspace/VAE_SLIM/input_cases/cases.png",
-                                        prefix="sd_full_channel"
-                                        )
-    build_diff_n_components_image(model_path="sd-legacy/stable-diffusion-v1-5", 
-                                  n_components=4, 
-                                  n_channels=4,
-                                  prefix="sd_full_channel")
-
-    # get_full_channel_pca_model_from_rgb(model_path="black-forest-labs/FLUX.1-dev", 
-    #                                     n_components=16, 
-    #                                     n_channels=16, 
+    # get_full_channel_pca_model_from_rgb(model_path="sd-legacy/stable-diffusion-v1-5", 
+    #                                     n_components=4, 
+    #                                     n_channels=4, 
     #                                     rgb_case_add="/workspace/VAE_SLIM/input_cases/cases.png",
-    #                                     prefix="flux_full_channel",
-    #                                     dtype=torch.bfloat16
+    #                                     prefix="sd_full_channel"
     #                                     )
+    # build_diff_n_components_image(model_path="sd-legacy/stable-diffusion-v1-5", 
+    #                               n_components=4, 
+    #                               n_channels=4,
+    #                               prefix="sd_full_channel")
 
-    # build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", 
-    #                               n_components=16, 
-    #                               n_channels=16, 
-    #                               prefix="flux_full_channel")
+    get_full_channel_pca_model_from_rgb(model_path="black-forest-labs/FLUX.1-dev", 
+                                        n_components=16, 
+                                        n_channels=16, 
+                                        rgb_case_add="/workspace/VAE_SLIM/input_cases/cases.png",
+                                        prefix="flux_full_channel",
+                                        dtype=torch.bfloat16
+                                        )
+
+    build_diff_n_components_image(model_path="black-forest-labs/FLUX.1-dev", 
+                                  n_components=16, 
+                                  n_channels=16, 
+                                  save_dir="/workspace/VAE_SLIM/vis/",
+                                  prefix="flux_full_channel")
 
         
 

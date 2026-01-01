@@ -10,3 +10,6 @@
 *.npy
 .locks/
 /output
+/analysis
+/ckpt_align
+/eval_results

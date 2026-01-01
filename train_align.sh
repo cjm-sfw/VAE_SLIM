@@ -1,0 +1,17 @@
+python train_align_with_args.py \
+  --vae1_path sd-legacy/stable-diffusion-v1-5 \
+  --vae2_path black-forest-labs/FLUX.1-dev \
+  --input_types image latent \
+  --train_data_dir train_images \
+  --eval_data_dir eval_images \
+  --train_batch_size 24 \
+  --eval_batch_size 4 \
+  --loss_type combined \
+  --grad_clip 1.5 \
+  --perceptual_weight 0.02 \
+  --mse_weight 0.02 \
+  --num_workers 8 \
+  --epochs 3 \
+  --scheduler_step_size 1 \
+  --scheduler_gamma 0.3 \
+  --learning_rate 1e-3
