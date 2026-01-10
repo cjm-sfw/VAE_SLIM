@@ -329,6 +329,9 @@ def parse_args():
                        help="Path to a configuration file to load additional parameters")
     parser.add_argument('--image_normalize', action='store_true', default=False,
                        help="Whether to normalize images to [0, 1] range")
+    parser.add_argument('--sample_mode', type=str, default="sample",
+                       choices=["sample", "mean"],
+                       help="Sampling mode for VAE: 'sample' or 'mean'")
     
     # Data Configuration
     parser.add_argument('--eval_data_dir', type=str, required=True,
@@ -580,6 +583,8 @@ def main():
     sample_count = 0
     batch_count = 0
     
+    sample_mode = args.sample_mode
+    
     with torch.no_grad():
         for batch_idx, batch in enumerate(eval_loader):
             if sample_count >= args.num_samples:
@@ -600,12 +605,21 @@ def main():
                 x_normalized = x
             
             # Get reconstructions
-            recon_vae1 = pipeline.latent_reconstruction(pipeline.VAE_1, x_normalized, generator=None, do_normalize=args.image_normalize)
-            recon_vae2 = pipeline.latent_reconstruction(pipeline.VAE_2, x_normalized, generator=None, do_normalize=args.image_normalize)
+            recon_vae1 = pipeline.latent_reconstruction(pipeline.VAE_1,
+                                                        x_normalized, 
+                                                        generator=None, 
+                                                        do_normalize=args.image_normalize, 
+                                                        sample_mode=sample_mode)
+            
+            recon_vae2 = pipeline.latent_reconstruction(pipeline.VAE_2, 
+                                                        x_normalized, 
+                                                        generator=None, 
+                                                        do_normalize=args.image_normalize, 
+                                                        sample_mode=sample_mode)
             
             # Get latent representations
-            z_vae1 = pipeline._encode_vae_image(pipeline.VAE_1, x_normalized, generator=None)
-            z_vae2 = pipeline._encode_vae_image(pipeline.VAE_2, x_normalized, generator=None)
+            z_vae1 = pipeline._encode_vae_image(pipeline.VAE_1, x_normalized, generator=None, sample_mode=sample_mode)
+            z_vae2 = pipeline._encode_vae_image(pipeline.VAE_2, x_normalized, generator=None, sample_mode=sample_mode)
             
             # Get aligned latent and reconstruction
             z_vae1_aligned = pipeline.align_module(x_normalized, z_vae1)

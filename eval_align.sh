@@ -1,0 +1,14 @@
+python eval_align.py \
+    --checkpoint ckpt_align/align_pipeline_20260109_004958.pth \
+    --image_normalize \
+    --eval_data_dir eval_images \
+    --output_dir eval_results \
+    --eval_batch_size 1 \
+    --num_workers 1 \
+    --num_samples 10 \
+    --metrics all \
+    --sample_mode mean \
+    --batch_evaluation \
+    --compute_rfid \
+    --max_fid_batches 10 \
+    --save_visualizations

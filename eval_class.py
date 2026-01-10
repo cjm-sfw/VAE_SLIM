@@ -85,7 +85,7 @@ class VAEReconstructionEvaluator:
         # LPIPS期望输入在[-1, 1]范围，但这里假设输入在[0, 1]
         # 如果需要，可以调整：input_tensor = input_tensor * 2 - 1
         with torch.no_grad():
-            lpips_val = self.lpips_model(original, reconstructed)
+            lpips_val = self.lpips_model(original, reconstructed, normalize=True)
         return lpips_val.mean().item()
     
     

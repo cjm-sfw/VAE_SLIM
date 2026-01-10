@@ -215,52 +215,52 @@ class AlignPipeline:
             # 编码VAE_2的图像
             z_vae2 = self._encode_vae_image(self.VAE_2, x, generator, sample_mode='mean')
             z_vae2 = z_vae2.to(device=self.device, dtype=self.dtype)
-            
-            # 如果需要图像重建用于感知损失
-            if hasattr(criterion, '__class__') and criterion.__class__.__name__ in ['PerceptualLoss', 'CombinedLoss']:
-                recon_vae2 = self._decode_vae_latents(self.VAE_2, z_vae2, do_normalize=image_normalize)
 
         # 对齐模块前向传播
         z_vae1_aligned = self.align_module(x, z_vae1)
         
         total_loss = 0
-        perceptual_loss = 0
-        latent_mse_loss = 0
-
+        loss_dict = {}
+        
         # 计算损失
-        if hasattr(criterion, '__class__') and criterion.__class__.__name__ == 'PerceptualLoss':
-            # 感知损失需要重建图像
-            recon_aligned = self._decode_vae_latents(self.VAE_2, z_vae1_aligned, do_normalize=image_normalize)
-            perceptual_loss = criterion(recon_aligned, recon_vae2)
-            latent_mse_loss = F.mse_loss(z_vae1_aligned, z_vae2)
-            total_loss = perceptual_loss + latent_mse_loss
-        elif hasattr(criterion, '__class__') and criterion.__class__.__name__ == 'CombinedLoss':
-            # 组合损失需要潜在空间和图像
-            # import pdb;pdb.set_trace()
-            recon_aligned = self._decode_vae_latents(self.VAE_2, z_vae1_aligned, do_normalize=image_normalize)
-            perceptual_loss = criterion(recon_aligned, recon_vae2)
-            latent_mse_loss = F.mse_loss(z_vae1_aligned, z_vae2)
-            total_loss = perceptual_loss + latent_mse_loss
-        else:
-            # 标准损失（MSE/L1）
-            latent_mse_loss = criterion(z_vae1_aligned, z_vae2)
-            total_loss = latent_mse_loss
+        for loss_type, loss_weight, addition in criterion:
+            if loss_type == 'l1':
+                loss = F.l1_loss(z_vae1_aligned, z_vae2)
+            elif loss_type == 'mse':
+                loss = F.mse_loss(z_vae1_aligned, z_vae2)
+            elif loss_type == 'perceptual':
+                # 假设有一个预定义的感知损失函数
+                from losses import PerceptualLoss
+                perceptual_loss = PerceptualLoss(device=self.device, dtype=self.dtype)
+                loss = perceptual_loss(z_vae1_aligned, z_vae2) * loss_weight
+            elif loss_type == 'lpips':
+                # 假设有一个预定义的LPIPS损失函数
+                from losses import lpips_loss
+                lpips_criterion = lpips_loss(addition, device=self.device, dtype=self.dtype)
+                x_vae1_aligned = self._decode_vae_latents(self.VAE_2, z_vae1_aligned, do_normalize=True)
+                x_vae2 = self._decode_vae_latents(self.VAE_2, z_vae2, do_normalize=True)
+                loss = lpips_criterion(x_vae1_aligned, x_vae2) * loss_weight
+            else:
+                raise ValueError(f"Unknown loss type: {loss_type}")
+            
+            loss_dict[loss_type] = loss.item()
+            
+            total_loss += loss * loss_weight
         
         total_loss.backward()
         optimizer.step()
         
         return {
             'total_loss': total_loss.item(),
-            'latent_mse_loss': latent_mse_loss.item(),
-            'perceptual_loss': perceptual_loss.item() if perceptual_loss else 0,
+            **loss_dict
         }
         
         
         
 
-    def latent_reconstruction(self, vae, x, generator=None, do_normalize=False):
+    def latent_reconstruction(self, vae, x, generator=None, do_normalize=False, sample_mode="sample"):
         """生成重建图像"""
-        z_x = self._encode_vae_image(vae, x, generator)
+        z_x = self._encode_vae_image(vae, x, generator, sample_mode=sample_mode)
         x_recon = self._decode_vae_latents(vae, z_x, do_normalize=do_normalize)
         return x_recon
         

@@ -32,6 +32,8 @@ def parse_args():
     # General Configuration
     parser.add_argument('--load_config', type=str, default=None,
                        help="Path to a JSON configuration file to load parameters from")
+    parser.add_argument('--load_checkpoint', type=str, default=None,
+                       help="Path to a checkpoint to load the model from")
     
     # VAE Model Configuration
     parser.add_argument('--vae1_path', type=str, default="black-forest-labs/FLUX.1-dev",
@@ -78,6 +80,11 @@ def parse_args():
                        help="Type of dataset to use")
     
     # Training Configuration
+    parser.add_argument('--it_or_epochs', type=str, default="epochs",
+                       choices=["iterations", "epochs"],
+                       help="Training mode: iterations or epochs")
+    parser.add_argument('--iterations', type=int, default=10000,
+                       help="Total number of training iterations")
     parser.add_argument('--epochs', type=int, default=200,
                        help="Number of training epochs")
     parser.add_argument('--warmup_steps', type=int, default=100,
@@ -101,18 +108,17 @@ def parse_args():
                        help="Gamma for learning rate scheduler")
     
     # Loss Configuration
-    parser.add_argument('--loss_type', type=str, default="l1",
-                       choices=["mse", "l1", "weighted_l1", "perceptual", "combined"],
+    parser.add_argument('--training_stage', type=int, default=1,
+                       help="Stage of training: align or reconstruct")
+
+    parser.add_argument('--loss_type', type=str, nargs='+', default=["l1"],
+                       choices=["mse", "l1", "perceptual", "lpips"],
                        help="Type of loss function to use")
-    parser.add_argument('--loss_weight', type=float, default=1.0,
+    parser.add_argument('--loss_weight', type=float, nargs='+',default=[1.0],
                        help="Weight for the loss function")
-    parser.add_argument('--perceptual_weight', type=float, default=0.1,
-                       help="Weight for perceptual loss when using combined loss")
-    parser.add_argument('--mse_weight', type=float, default=1.0,
-                       help="Weight for MSE loss when using combined loss")
     
     # Gradient Clipping Configuration
-    parser.add_argument('--grad_clip', type=float, default=3.5,
+    parser.add_argument('--grad_clip', type=float, default=2.5,
                        help="Gradient clipping norm (0.0 means no clipping)")
     
     # Logging & Checkpointing
@@ -120,16 +126,16 @@ def parse_args():
                        help="Directory for TensorBoard logs")
     parser.add_argument('--save_dir', type=str, default="ckpt_align",
                        help="Directory for saving checkpoints")
-    parser.add_argument('--eval_frequency', type=int, default=10,
-                       help="Frequency of evaluation (in epochs)")
-    parser.add_argument('--save_frequency', type=int, default=50,
-                       help="Frequency of checkpoint saving (in epochs)")
-    parser.add_argument('--config_save_path', type=str, default="config/align_training_config.json",
+    parser.add_argument('--eval_frequency', type=int, default=1,
+                       help="Frequency of evaluation")
+    parser.add_argument('--save_frequency', type=int, default=1,
+                       help="Frequency of checkpoint saving")
+    parser.add_argument('--config_save_path', type=str, default="config/",
                        help="Path to save training configuration")
     
     # Visualization Configuration
-    parser.add_argument('--visualize_frequency', type=int, default=20,
-                       help="Frequency of visualization (in epochs)")
+    parser.add_argument('--visualize_frequency', type=int, default=1,
+                       help="Frequency of visualization")
     parser.add_argument('--num_visualize_samples', type=int, default=4,
                        help="Number of samples to visualize")
     
@@ -229,27 +235,19 @@ def setup_scheduler(optimizer, args):
     return scheduler
 
 
-def get_loss_function(loss_type, args):
+def get_loss_function(loss_type: list, args):
     """Get loss function based on type"""
-    if loss_type == "mse":
-        return nn.MSELoss()
-    elif loss_type == "l1":
-        return nn.L1Loss()
-    elif loss_type == "weighted_l1":
-        return WeightedL1Loss()
-    elif loss_type == "perceptual":
-        from losses import PerceptualLoss
-        dtype = get_dtype(args.precision)
-        return PerceptualLoss(device=args.device, dtype=dtype)
-    elif loss_type == "combined":
-        from losses import PerceptualLoss, CombinedLoss
-        mse_loss = nn.MSELoss()
-        dtype = get_dtype(args.precision)
-        perceptual_loss = PerceptualLoss(device=args.device, dtype=dtype)
-        return CombinedLoss([mse_loss, perceptual_loss], 
-                           weights=[args.mse_weight, args.perceptual_weight])
-    else:
-        raise ValueError(f"Unknown loss type: {loss_type}")
+    
+    loss_list = []
+    for loss in loss_type:
+        if loss == "lpips":
+            import lpips
+            addition = lpips.LPIPS(net='alex').to(args.device, dtype=get_dtype(args.precision))
+        else:
+            addition = None
+        loss_list.append((loss, args.loss_weight[loss_type.index(loss)], addition))
+
+    return loss_list
 
 
 def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator):
@@ -262,13 +260,17 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
     
     # Create pipeline
     pipeline = create_align_pipeline(vae1, vae2, args)
+    if args.load_checkpoint:
+        # Load checkpoint if provided
+        pipeline.load(args.load_checkpoint)
+        print(f"Loaded checkpoint from: {args.load_checkpoint}")
     
     # Setup optimizer and scheduler
     optimizer = setup_optimizer(pipeline, args)
     scheduler = setup_scheduler(optimizer, args)
     
     # Loss function
-    criterion = get_loss_function(args.loss_type, args).to(args.device)
+    criterion = get_loss_function(args.loss_type, args)
     
     dtype = get_dtype(args.precision)
     global_step = 0
@@ -276,11 +278,8 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
     # Main training loop
     for epoch in tqdm(range(args.epochs)):
         pipeline.align_module.train()
-        epoch_losses = {
-            'total_loss': 0,
-            'latent_mse_loss': 0,
-            'perceptual_loss': 0
-        }
+        epoch_losses = {k: 0.0 for k in args.loss_type}
+        epoch_losses['total_loss'] = 0.0
         
         for batch_idx, x in tqdm(enumerate(train_loader)):
             # Warmup learning rate
@@ -342,6 +341,12 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
             visualize_results(pipeline, eval_loader, writer, epoch, args, dtype)
         
         print(f"Epoch {epoch}: {avg_losses}, LR: {current_lr:.2e}")
+        
+        if args.save_frequency > 0 and epoch % args.save_frequency == 0:
+            # Save checkpoint
+            checkpoint_path = f"{args.save_dir}/align_pipeline_epoch_{epoch}.pth"
+            pipeline.save(checkpoint_path)
+            print(f"Checkpoint saved to: {checkpoint_path}")
     
     writer.close()
     print(f"TensorBoard logs saved to: {log_dir}")
@@ -466,6 +471,8 @@ def visualize_results(pipeline, eval_loader, writer, epoch, args, dtype):
 def save_config(args, save_path):
     """Save training configuration to JSON file"""
     config_dict = vars(args)
+    datetime_str = datetime.now().strftime("%Y%m%d_%H%M%S")
+    save_path = os.path.join(save_path, f"align_training_config_{datetime_str}.json")
     with open(save_path, 'w') as f:
         json.dump(config_dict, f, indent=2)
     print(f"Training configuration saved to: {save_path}")

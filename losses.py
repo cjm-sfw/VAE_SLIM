@@ -114,22 +114,32 @@ class PerceptualLoss(_Loss):
         return loss
 
 
-class CombinedLoss(_Loss):
-    """Combination of multiple losses with weights"""
+class lpips_loss(_Loss):
+    """LPIPS Loss using pretrained LPIPS model"""
     
-    def __init__(self, losses, weights=None):
+    def __init__(self, lpips_model, reduction='mean', device='cuda', dtype=torch.bfloat16):
+        super(lpips_loss, self).__init__(reduction=reduction)
+        
+        self.lpips_model = lpips_model
+        self.lpips_model.eval()
+        self.device = device
+        self.dtype = dtype
+
+    def forward(self, input, target):
         """
         Args:
-            losses: List of loss functions
-            weights: List of weights for each loss
+            input: Tensor of shape (B, C, H, W) in range [0, 1] or [-1, 1]
+            target: Tensor of shape (B, C, H, W) in same range as input
+        Returns:
+            LPIPS loss value
         """
-        super(CombinedLoss, self).__init__()
-        self.losses = losses
-        self.weights = weights if weights is not None else [1.0] * len(losses)
+        # Ensure input and target are on the same device and dtype as LPIPS model
+        input = input.to(device=self.device, dtype=self.dtype)
+        target = target.to(device=self.device, dtype=self.dtype)
         
-    def forward(self, input, target, **kwargs):
-        total_loss = 0
-        for loss_fn, weight in zip(self.losses, self.weights):
-            loss = loss_fn(input, target, **kwargs)
-            total_loss += weight * loss
-        return total_loss
+        # Compute LPIPS loss
+        with torch.no_grad():
+            lpips_val = self.lpips_model(input, target, normalize=True)
+        
+        return lpips_val.mean()
+

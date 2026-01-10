@@ -13,3 +13,5 @@
 /analysis
 /ckpt_align
 /eval_results
+/infer_align_vis_results
+/config/align_training_config_*.json
