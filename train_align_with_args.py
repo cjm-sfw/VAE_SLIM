@@ -39,13 +39,18 @@ def parse_args():
     parser.add_argument('--vae1_path', type=str, default="black-forest-labs/FLUX.1-dev",
                        help="Path to the first VAE model, e.g., black-forest-labs/FLUX.1-dev")
     parser.add_argument('--vae2_path', type=str, default="sd-legacy/stable-diffusion-v1-5",
-                       help="Path to the second VAE model, e.g., sd-legacy/stable-diffusion-v1-5")
+                       help="Path to the second VAE model, e.g., sd-legacy/stable-diffusion-v1-5, \
+                                                                Tongyi-MAI/Z-Image-Turbo, stabilityai/stable-diffusion-3.5-large, \
+                                                                    stabilityai/stable-diffusion-xl-base-1.0")
     parser.add_argument('--vae1_subfolder', type=str, default="vae",
                        help="Subfolder for VAE1 model")
     parser.add_argument('--vae2_subfolder', type=str, default="vae",
                        help="Subfolder for VAE2 model")
     
     # Alignment Module Configuration
+    parser.add_argument('--model_version', type=str, default="base",
+                       choices=["base", "longtail", "light"],
+                       help="Version of the alignment module to use")
     parser.add_argument('--img_in_channels', type=int, default=3,
                        help="Input image channels for alignment module")
     parser.add_argument('--in_channels', type=int, default=4,
@@ -58,6 +63,8 @@ def parse_args():
                        help="Number of residual blocks in each downsample stage")
     parser.add_argument('--downsample_times', type=int, default=3,
                        help="Number of downsample times in alignment module")
+    parser.add_argument('--channel_times', type=int, default=4,
+                          help="Channel expansion factor for each downsample stage")
     parser.add_argument('--input_types', type=str, nargs='+', default=['image', 'latent'],
                        choices=['image', 'latent', 'DWT'],
                        help="Input types for alignment module")
@@ -170,12 +177,14 @@ def create_align_pipeline(vae1, vae2, args):
     pipeline = AlignPipeline(
         VAE_1=vae1,
         VAE_2=vae2,
+        model_version=args.model_version,
         img_in_channels=args.img_in_channels,
         in_channels=args.in_channels,
         hidden_channels=args.hidden_channels,
         out_channels=args.out_channels,
         num_blocks=args.num_blocks,
         downsample_times=args.downsample_times,
+        channel_times=args.channel_times,
         input_types=args.input_types,
         device=args.device,
         dtype=get_dtype(args.precision)

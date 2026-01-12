@@ -19,9 +19,10 @@ class ResidualBlock(nn.Module):
 class AlignModule(nn.Module):
     """对齐模块，使用残差网络构建下采样Module"""
 
-    def __init__(self, img_in_channels, in_channels, hidden_channels, out_channels, num_blocks=2, downsample_times=3, input_types=['image', 'latent', 'DWT']):
+    def __init__(self, model_version, img_in_channels, in_channels, hidden_channels, out_channels, num_blocks=2, downsample_times=3, channel_times=4, input_types=['image', 'latent', 'DWT']):
         """
         Args:
+            model_version (str): 模型版本，'base' 或 'longtail'
             in_channels (int): 输入通道数
             hidden_channels (int): 隐藏层通道数
             out_channels (int): 输出通道数
@@ -31,6 +32,8 @@ class AlignModule(nn.Module):
         """
         super(AlignModule, self).__init__()
 
+        self.model_version = model_version  # 模型版本
+        
         self.img_in_channels = img_in_channels
         self.in_channels = in_channels
         self.hidden_channels = hidden_channels
@@ -49,14 +52,28 @@ class AlignModule(nn.Module):
         )
 
         for down_index in range(self.downsample_times):
-            hidden_channels = self.hidden_channels * (4 ** down_index)
+            hidden_channels = self.hidden_channels * (channel_times ** down_index)
             residual_blocks = nn.ModuleList()
             for _ in range(self.num_blocks):
                 residual_blocks.append(ResidualBlock(hidden_channels, hidden_channels))
             self.downsample_blocks.append(nn.Sequential(*residual_blocks))
-            self.downsample_blocks.append(nn.Conv2d(hidden_channels, hidden_channels * 4, kernel_size=3, stride=2, padding=1))
+            self.downsample_blocks.append(nn.Conv2d(hidden_channels, hidden_channels * channel_times, kernel_size=3, stride=2, padding=1))
 
-        self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * (4 ** self.downsample_times), out_channels, kernel_size=1))
+        if self.model_version == 'longtail':
+            # 在longtail版本中，最后一个下采样阶段的输出通道数为out_channels
+            self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * (channel_times ** self.downsample_times), 
+                                                    self.hidden_channels * channel_times, 
+                                                    kernel_size=3,
+                                                    stride=1,
+                                                    padding=1))
+            residual_blocks = nn.ModuleList()
+            for _ in range(self.num_blocks):
+                residual_blocks.append(ResidualBlock(self.hidden_channels * channel_times, self.hidden_channels * channel_times))
+            self.downsample_blocks.append(nn.Sequential(*residual_blocks))
+            self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * channel_times, out_channels, kernel_size=3, padding=1, stride=1))
+
+        elif self.model_version == 'base':
+            self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * (channel_times ** self.downsample_times), out_channels, kernel_size=1))
 
         self.latent_trans_blocks = nn.ModuleList()
         self.latent_trans_blocks.append(nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1))
@@ -90,7 +107,6 @@ class AlignModule(nn.Module):
             z = block(z)
 
         # 对齐潜在变量
-        
         x = x + z  # 假设对齐方式是简单相加
 
         return x
@@ -102,12 +118,14 @@ class AlignPipeline:
     def __init__(self, 
                  VAE_1, 
                  VAE_2, 
+                 model_version='base',
                  img_in_channels=3, 
                  in_channels=16,
                  hidden_channels=64, 
                  out_channels=16, 
                  num_blocks=2, 
                  downsample_times=3,
+                 channel_times=4,
                  input_types=['image', 'latent'],
                  device='cuda', 
                  dtype=torch.bfloat16):
@@ -118,12 +136,14 @@ class AlignPipeline:
         self.dtype = dtype
 
         self.align_module = AlignModule(
+            model_version=model_version,  # 模型版本
             img_in_channels=img_in_channels,  # 输入图像通道数
             in_channels=in_channels,  # 输入潜在变量通道数
             hidden_channels=hidden_channels,  # 隐藏层通道数
             out_channels=out_channels,  # 输出通道数
             num_blocks=num_blocks,  # 每个下采样阶段的残差块数量
             downsample_times=downsample_times,  # 下采样次数
+            channel_times=channel_times,  # 通道扩展倍数
             input_types=input_types  # 输入类型列表
         ).to(device=self.device, dtype=self.dtype)
         

@@ -44,6 +44,7 @@ def analyze_pipeline_parameters(args):
     pipeline = AlignPipeline(
         VAE_1=vae1,
         VAE_2=vae2,
+        model_version="longtail",
         img_in_channels=args.img_in_channels,
         in_channels=args.in_channels,
         hidden_channels=args.hidden_channels,
@@ -58,6 +59,8 @@ def analyze_pipeline_parameters(args):
     # 冻结VAE（与训练一致）
     pipeline.freeze_vae()
     
+    
+    print(pipeline.align_module)
     print("=" * 60)
     print("AlignPipeline 参数分析")
     print("=" * 60)

@@ -5,10 +5,10 @@ python eval_align.py \
     --output_dir eval_results \
     --eval_batch_size 1 \
     --num_workers 1 \
-    --num_samples 10 \
+    --num_samples 15 \
     --metrics all \
     --sample_mode mean \
     --batch_evaluation \
     --compute_rfid \
-    --max_fid_batches 10 \
+    --max_fid_batches 15 \
     --save_visualizations
