@@ -128,16 +128,17 @@ def main():
 
 
 class ImageNetDataloader(DataLoader):
-    def __init__(self, dataset, batch_size=32, shuffle=True, num_workers=4, transform=None, with_label=False):
+    def __init__(self, dataset, batch_size=32, shuffle=True, num_workers=4, transform=None, with_label=False, image_size=256):
         if transform is None:
             self.transform = transforms.Compose([
-                transforms.Resize((256, 256)),  # 确保图像大小一致
+                transforms.Resize((image_size, image_size)),  # 确保图像大小一致
                 transforms.ToTensor(),           # 转换为Tensor
                 # transforms.Normalize(            # 标准化（使用ImageNet统计量）
                 #     mean=[0.485, 0.456, 0.406],
                 #     std=[0.229, 0.224, 0.225]
                 # )
             ])
+        self.image_size = image_size
         
         if with_label:
             self.collate_fn = self.collate_fn_with_label

@@ -143,3 +143,71 @@ class lpips_loss(_Loss):
         
         return lpips_val.mean()
 
+
+    
+
+
+class HuberLoss(_Loss):
+    """Huber Loss"""
+    
+    def __init__(self, delta=1.0, reduction='mean'):
+        super(HuberLoss, self).__init__(reduction=reduction)
+        self.delta = delta
+
+    def forward(self, input, target):
+        """
+        Args:
+            input: Tensor of shape (B, C, H, W)
+            target: Tensor of shape (B, C, H, W)
+        Returns:
+            Huber loss value
+        """
+        diff = input - target
+        abs_diff = torch.abs(diff)
+        
+        loss = torch.where(abs_diff < self.delta,
+                           0.5 * diff ** 2,
+                           self.delta * (abs_diff - 0.5 * self.delta))
+        
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss
+        
+class DWTLoss(_Loss):
+    """DWT Loss"""
+        
+class DCTLoss(_Loss):
+    """DCT Loss"""
+    
+    def __init__(self, reduction='mean'):
+        super(DCTLoss, self).__init__(reduction=reduction)
+
+    def forward(self, input, target):
+        import torch_dct
+        """
+        Args:
+            input: Tensor of shape (B, C, H, W)
+            target: Tensor of shape (B, C, H, W)
+        Returns:
+            DCT loss value
+        """
+        # Ensure input and target are on the same device
+        input = input.to(target.device)
+        target = target.to(input.device)
+
+        # Compute DCT for both input and target
+        input_dct = torch_dct.dct_2d(input)
+        target_dct = torch_dct.dct_2d(target)
+
+        # Compute the DCT loss
+        loss = torch.abs(input_dct - target_dct)
+
+        if self.reduction == 'mean':
+            return loss.mean()
+        elif self.reduction == 'sum':
+            return loss.sum()
+        else:
+            return loss

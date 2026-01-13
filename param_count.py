@@ -141,7 +141,7 @@ if __name__ == "__main__":
         in_channels = 4
         hidden_channels = 32
         out_channels = 16
-        num_blocks = 2
+        num_blocks = 4
         downsample_times = 3
         input_types = ['image', 'latent']
         precision = "bfloat16"

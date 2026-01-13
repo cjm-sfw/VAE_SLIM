@@ -1,6 +1,7 @@
 python eval_align.py \
-    --checkpoint ckpt_align/align_pipeline_20260109_004958.pth \
+    --checkpoint /workspace/VAE_SLIM/ckpt_align/align_pipeline_20260109_004958.pth \
     --image_normalize \
+    --model_version base \
     --eval_data_dir eval_images \
     --output_dir eval_results \
     --eval_batch_size 1 \

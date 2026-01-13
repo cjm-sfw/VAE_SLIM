@@ -49,7 +49,7 @@ def parse_args():
     
     # Alignment Module Configuration
     parser.add_argument('--model_version', type=str, default="base",
-                       choices=["base", "longtail", "light"],
+                       choices=["base", "longtail", "light", "variational"],
                        help="Version of the alignment module to use")
     parser.add_argument('--img_in_channels', type=int, default=3,
                        help="Input image channels for alignment module")
@@ -70,6 +70,8 @@ def parse_args():
                        help="Input types for alignment module")
     parser.add_argument('--image_normalize', action='store_true', default=True,
                        help="Whether to normalize images to [-1, 1] range before forward")
+    parser.add_argument('--residual_with_norm', action='store_true', default=False,
+                       help="Whether to use residual blocks with normalization in alignment module")
     
     # Data Configuration
     parser.add_argument('--train_data_dir', type=str, default="train_images",
@@ -85,7 +87,9 @@ def parse_args():
     parser.add_argument('--dataset_type', type=str, default="imagenet",
                        choices=["default", "imagenet"],
                        help="Type of dataset to use")
-    
+    parser.add_argument('--image_size', type=int, default=256,
+                       help="Size of the input images")
+
     # Training Configuration
     parser.add_argument('--it_or_epochs', type=str, default="epochs",
                        choices=["iterations", "epochs"],
@@ -119,7 +123,7 @@ def parse_args():
                        help="Stage of training: align or reconstruct")
 
     parser.add_argument('--loss_type', type=str, nargs='+', default=["l1"],
-                       choices=["mse", "l1", "perceptual", "lpips"],
+                       choices=["mse", "l1", "perceptual", "lpips", "huber", "DCT", "KL"],
                        help="Type of loss function to use")
     parser.add_argument('--loss_weight', type=float, nargs='+',default=[1.0],
                        help="Weight for the loss function")
@@ -187,7 +191,8 @@ def create_align_pipeline(vae1, vae2, args):
         channel_times=args.channel_times,
         input_types=args.input_types,
         device=args.device,
-        dtype=get_dtype(args.precision)
+        dtype=get_dtype(args.precision),
+        residual_with_norm=args.residual_with_norm
     )
     
     # Freeze VAE models
@@ -196,16 +201,16 @@ def create_align_pipeline(vae1, vae2, args):
     return pipeline
 
 
-def create_data_loaders(train_data_dir, eval_data_dir, train_batch_size, eval_batch_size, num_workers, dataset_type):
+def create_data_loaders(train_data_dir, eval_data_dir, train_batch_size, eval_batch_size, num_workers, dataset_type, image_size):
     """Create train and eval data loaders with configurable parameters"""
     if dataset_type == "imagenet":
         from dataloader import ImageNetDataloader, get_imagenet_dataset
         train_dataset = get_imagenet_dataset(split="train")
         eval_dataset = get_imagenet_dataset(split="test")
         
-        train_loader = ImageNetDataloader(train_dataset, batch_size=train_batch_size, shuffle=True, num_workers=num_workers)
-        eval_loader = ImageNetDataloader(eval_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers)
-        
+        train_loader = ImageNetDataloader(train_dataset, batch_size=train_batch_size, shuffle=True, num_workers=num_workers, image_size=image_size)
+        eval_loader = ImageNetDataloader(eval_dataset, batch_size=eval_batch_size, shuffle=False, num_workers=num_workers, image_size=image_size)
+
     else:
         train_loader = image_dataloader(
             data_dir=train_data_dir,
@@ -234,13 +239,23 @@ def setup_optimizer(pipeline, args):
     return optimizer
 
 
-def setup_scheduler(optimizer, args):
+def setup_scheduler(optimizer, args, mode="epochs"):
     """Setup learning rate scheduler"""
-    scheduler = torch.optim.lr_scheduler.StepLR(
-        optimizer,
-        step_size=args.scheduler_step_size,
-        gamma=args.scheduler_gamma
-    )
+    if mode == "iterations":
+        # For iteration mode, we need to adjust step size
+        # The scheduler will be called every iteration
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=args.scheduler_step_size,
+            gamma=args.scheduler_gamma
+        )
+    else:
+        # For epoch mode, original behavior
+        scheduler = torch.optim.lr_scheduler.StepLR(
+            optimizer,
+            step_size=args.scheduler_step_size,
+            gamma=args.scheduler_gamma
+        )
     return scheduler
 
 
@@ -276,7 +291,7 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
     
     # Setup optimizer and scheduler
     optimizer = setup_optimizer(pipeline, args)
-    scheduler = setup_scheduler(optimizer, args)
+    scheduler = setup_scheduler(optimizer, args, mode=args.it_or_epochs)
     
     # Loss function
     criterion = get_loss_function(args.loss_type, args)
@@ -284,13 +299,100 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
     dtype = get_dtype(args.precision)
     global_step = 0
     
+    # Determine training mode
+    if args.it_or_epochs == "iterations":
+        print(f"Training in iteration mode for {args.iterations} iterations")
+        # Create infinite data iterator for iteration mode
+        import itertools
+        train_data_iter = itertools.cycle(train_loader)
+        total_iterations = args.iterations
+    else:
+        print(f"Training in epoch mode for {args.epochs} epochs")
+        total_iterations = None  # Not used in epoch mode
+    
     # Main training loop
-    for epoch in tqdm(range(args.epochs)):
-        pipeline.align_module.train()
-        epoch_losses = {k: 0.0 for k in args.loss_type}
-        epoch_losses['total_loss'] = 0.0
-        
-        for batch_idx, x in tqdm(enumerate(train_loader)):
+    if args.it_or_epochs == "epochs":
+        # Original epoch-based training
+        for epoch in tqdm(range(args.epochs)):
+            pipeline.align_module.train()
+            epoch_losses = {k: 0.0 for k in args.loss_type}
+            epoch_losses['total_loss'] = 0.0
+            
+            for batch_idx, x in tqdm(enumerate(train_loader)):
+                # Warmup learning rate
+                if global_step < args.warmup_steps:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = min(args.learning_rate, args.learning_rate * (global_step + 1) / args.warmup_steps)
+                
+                x = x['pixel_values'].to(args.device).to(dtype)
+                
+                # Training step
+                optimizer.zero_grad()
+                
+                # Forward pass and loss calculation
+                loss_dict = pipeline.train_step(x, optimizer, criterion, generator, args.image_normalize)
+                
+                # Record losses
+                for k, v in loss_dict.items():
+                    epoch_losses[k] += v
+                    writer.add_scalar(f'Batch/{k}', v, global_step)
+                
+                # Apply gradient clipping if enabled
+                if args.grad_clip > 0:
+                    clip_norm = torch.nn.utils.clip_grad_norm_(
+                        pipeline.align_module.parameters(), 
+                        max_norm=args.grad_clip
+                    )
+                    writer.add_scalar('Training/Gradient_Clip_Norm', clip_norm.item(), global_step)
+                
+                # Record gradient norm
+                total_norm = 0
+                for p in pipeline.align_module.parameters():
+                    if p.grad is not None:
+                        param_norm = p.grad.data.norm(2)
+                        total_norm += param_norm.item() ** 2
+                total_norm = total_norm ** 0.5
+                writer.add_scalar('Training/Gradient_Norm', total_norm, global_step)
+                
+                global_step += 1
+            
+            # Evaluation and logging
+            if epoch % args.eval_frequency == 0:
+                evaluate_and_log(pipeline, eval_loader, writer, epoch, args, dtype)
+            
+            # Learning rate scheduling
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
+            writer.add_scalar('Training/Learning_Rate', current_lr, epoch)
+            
+            # Record epoch statistics
+            avg_losses = {k: v/len(train_loader) for k, v in epoch_losses.items()}
+            for k, v in avg_losses.items():
+                writer.add_scalar(f'Epoch/{k}', v, epoch)
+            
+            # Log model output statistics
+            log_model_stats(pipeline, eval_loader, writer, epoch, args, dtype)
+            
+            # Visualization
+            if epoch % args.visualize_frequency == 0:
+                visualize_results(pipeline, eval_loader, writer, epoch, args, dtype)
+            
+            print(f"Epoch {epoch}: {avg_losses}, LR: {current_lr:.2e}")
+            
+            if args.save_frequency > 0 and epoch % args.save_frequency == 0:
+                # Save checkpoint
+                checkpoint_path = f"{args.save_dir}/align_pipeline_epoch_{epoch}.pth"
+                pipeline.save(checkpoint_path)
+                print(f"Checkpoint saved to: {checkpoint_path}")
+    
+    else:  # iteration mode
+        # Iteration-based training
+        for iteration in tqdm(range(total_iterations)):
+            pipeline.align_module.train()
+            
+            # Get next batch from infinite iterator
+            x = next(train_data_iter)
+            
             # Warmup learning rate
             if global_step < args.warmup_steps:
                 for param_group in optimizer.param_groups:
@@ -306,7 +408,6 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
             
             # Record losses
             for k, v in loss_dict.items():
-                epoch_losses[k] += v
                 writer.add_scalar(f'Batch/{k}', v, global_step)
             
             # Apply gradient clipping if enabled
@@ -326,36 +427,34 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
             total_norm = total_norm ** 0.5
             writer.add_scalar('Training/Gradient_Norm', total_norm, global_step)
             
-            global_step += 1
-        
-        # Evaluation and logging
-        if epoch % args.eval_frequency == 0:
-            evaluate_and_log(pipeline, eval_loader, writer, epoch, args, dtype)
-        
-        # Learning rate scheduling
-        scheduler.step()
-        current_lr = scheduler.get_last_lr()[0]
-        writer.add_scalar('Training/Learning_Rate', current_lr, epoch)
-        
-        # Record epoch statistics
-        avg_losses = {k: v/len(train_loader) for k, v in epoch_losses.items()}
-        for k, v in avg_losses.items():
-            writer.add_scalar(f'Epoch/{k}', v, epoch)
-        
-        # Log model output statistics
-        log_model_stats(pipeline, eval_loader, writer, epoch, args, dtype)
-        
-        # Visualization
-        if epoch % args.visualize_frequency == 0:
-            visualize_results(pipeline, eval_loader, writer, epoch, args, dtype)
-        
-        print(f"Epoch {epoch}: {avg_losses}, LR: {current_lr:.2e}")
-        
-        if args.save_frequency > 0 and epoch % args.save_frequency == 0:
+            # Learning rate scheduling (step every iteration in iteration mode)
+            scheduler.step()
+            current_lr = scheduler.get_last_lr()[0]
+            writer.add_scalar('Training/Learning_Rate', current_lr, global_step)
+            
+            # Evaluation and logging
+            if iteration % args.eval_frequency == 0:
+                evaluate_and_log(pipeline, eval_loader, writer, iteration, args, dtype)
+            
+            # Log model output statistics
+            if iteration % args.eval_frequency == 0:
+                log_model_stats(pipeline, eval_loader, writer, iteration, args, dtype)
+            
+            # Visualization
+            if iteration % args.visualize_frequency == 0:
+                visualize_results(pipeline, eval_loader, writer, iteration, args, dtype)
+            
+            # Print progress
+            if iteration % 100 == 0:
+                print(f"Iteration {iteration}/{total_iterations}: {loss_dict}, LR: {current_lr:.2e}")
+            
             # Save checkpoint
-            checkpoint_path = f"{args.save_dir}/align_pipeline_epoch_{epoch}.pth"
-            pipeline.save(checkpoint_path)
-            print(f"Checkpoint saved to: {checkpoint_path}")
+            if args.save_frequency > 0 and iteration % args.save_frequency == 0:
+                checkpoint_path = f"{args.save_dir}/align_pipeline_iteration_{iteration}.pth"
+                pipeline.save(checkpoint_path)
+                print(f"Checkpoint saved to: {checkpoint_path}")
+            
+            global_step += 1
     
     writer.close()
     print(f"TensorBoard logs saved to: {log_dir}")
@@ -373,13 +472,26 @@ def evaluate_and_log(pipeline, eval_loader, writer, epoch, args, dtype):
         if args.image_normalize:
             # Normalize images to [-1, 1] range
             x = x * 2 - 1
-        # Get latent representations
-        z_vae1 = pipeline._encode_vae_image(pipeline.VAE_1, x, generator=None)
-        z_vae2 = pipeline._encode_vae_image(pipeline.VAE_2, x, generator=None)
-        
-        # Get aligned latent
-        z_vae1_aligned = pipeline.align_module(x, z_vae1)
-        
+            
+        if pipeline.model_version == "variational":
+            # 编码VAE_1的图像
+            z_vae1 = pipeline._encode_vae_image(pipeline.VAE_1, x, generator=None, sample_mode='sample')
+            z_vae1 = z_vae1.to(device=pipeline.device, dtype=pipeline.dtype)
+            # 编码VAE_2的图像
+            z_vae2 = pipeline._encode_vae_image(pipeline.VAE_2, x, generator=None, sample_mode='sample')
+            z_vae2 = z_vae2.to(device=pipeline.device, dtype=pipeline.dtype)
+
+            z_vae1_aligned = pipeline.align_module(x, z_vae1)
+            z_vae1_aligned, z_vae1_aligned_dist = pipeline.align_module.sample(z_vae1_aligned, generator=None)
+
+        else:
+            # Get latent representations
+            z_vae1 = pipeline._encode_vae_image(pipeline.VAE_1, x, generator=None)
+            z_vae2 = pipeline._encode_vae_image(pipeline.VAE_2, x, generator=None)
+            
+            # Get aligned latent
+            z_vae1_aligned = pipeline.align_module(x, z_vae1)
+            
         # Calculate alignment error
         alignment_error = F.mse_loss(z_vae1_aligned, z_vae2)
         
@@ -441,6 +553,10 @@ def visualize_results(pipeline, eval_loader, writer, epoch, args, dtype):
         
         # Get aligned latent and reconstruction
         z_vae1_aligned = pipeline.align_module(x, z_vae1)
+        
+        if pipeline.model_version == "variational":
+            z_vae1_aligned, _ = pipeline.align_module.sample(z_vae1_aligned, generator=None)
+        
         recon_aligned = pipeline._decode_vae_latents(pipeline.VAE_2, z_vae1_aligned, do_normalize=args.image_normalize)
 
         if args.image_normalize:
@@ -532,7 +648,7 @@ def main():
     train_loader, eval_loader = create_data_loaders(
         args.train_data_dir, args.eval_data_dir,
         args.train_batch_size, args.eval_batch_size, args.num_workers,
-        args.dataset_type
+        args.dataset_type, args.image_size
     )
     
     # Setup generator
@@ -542,7 +658,10 @@ def main():
     os.makedirs(args.save_dir, exist_ok=True)
     
     # Training
-    logger.info(f"Starting alignment training with {args.epochs} epochs")
+    if args.it_or_epochs == "iterations":
+        logger.info(f"Starting alignment training with {args.iterations} iterations")
+    else:
+        logger.info(f"Starting alignment training with {args.epochs} epochs")
     pipeline = train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
     
     # Save final checkpoint

@@ -327,6 +327,9 @@ def parse_args():
                        help="Subfolder for VAE2 model")
     parser.add_argument('--config_load', type=str, default=None,
                        help="Path to a configuration file to load additional parameters")
+    parser.add_argument('--model_version', type=str, default="base",
+                       choices=["base", "longtail"],
+                       help="Version of the model to use for evaluation")
     parser.add_argument('--image_normalize', action='store_true', default=False,
                        help="Whether to normalize images to [0, 1] range")
     parser.add_argument('--sample_mode', type=str, default="sample",
@@ -544,6 +547,7 @@ def main():
     pipeline = AlignPipeline(
         VAE_1=vae1,
         VAE_2=vae2,
+        model_version=args.model_version,
         img_in_channels=3,
         in_channels=4,
         hidden_channels=32,
@@ -624,6 +628,8 @@ def main():
             # Get aligned latent and reconstruction
             z_vae1_aligned = pipeline.align_module(x_normalized, z_vae1)
             recon_aligned = pipeline._decode_vae_latents(pipeline.VAE_2, z_vae1_aligned, do_normalize=args.image_normalize)
+            
+            # import pdb;pdb.set_trace()
             
             # Ensure images are in [0, 1] range for evaluation
             if args.image_normalize:

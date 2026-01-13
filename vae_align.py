@@ -3,23 +3,53 @@ import torch.nn as nn
 import torch.nn.functional as F
 
 class ResidualBlock(nn.Module):
-    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1):
+    def __init__(self, in_channels, out_channels, kernel_size=3, stride=1, padding=1, with_norm=False):
         super(ResidualBlock, self).__init__()
+        self.with_norm = with_norm
+        if self.with_norm:
+            self.residual_conv = nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, padding=0) if in_channels != out_channels else nn.Identity()
+        
         self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size, stride, padding)
         self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size, stride, padding)
         self.relu = nn.ReLU(inplace=True)
+        if self.with_norm:
+            self.relu = nn.SiLU(inplace=True)
+            self.gn1 = nn.GroupNorm(16, out_channels)  # 使用GroupNorm代替LayerNorm
+            self.gn2 = nn.GroupNorm(16, out_channels)  # 使用GroupNorm代替LayerNorm
 
     def forward(self, x):
-        residual = x
-        out = self.relu(self.conv1(x))
-        out = self.conv2(out)
-        out += residual
-        return self.relu(out)
+        
+        if self.with_norm:
+            residual = self.residual_conv(x)
+            
+            out = self.relu(self.gn1(self.conv1(x)))
+            out = self.relu(self.gn2(self.conv2(out)))
+            out += residual
+            return out
+        else:
+            residual = x
+            out = self.relu(self.conv1(x))
+            out = self.conv2(out)
+            out += residual
+            return self.relu(out)
+        
+
 
 class AlignModule(nn.Module):
     """对齐模块，使用残差网络构建下采样Module"""
 
-    def __init__(self, model_version, img_in_channels, in_channels, hidden_channels, out_channels, num_blocks=2, downsample_times=3, channel_times=4, input_types=['image', 'latent', 'DWT']):
+    def __init__(self, 
+                 model_version, 
+                 img_in_channels, 
+                 in_channels, 
+                 hidden_channels, 
+                 out_channels, 
+                 num_blocks=2, 
+                 downsample_times=3, 
+                 channel_times=4, 
+                 input_types=['image', 'latent', 'DWT'],
+                 residual_with_norm=False
+                 ):
         """
         Args:
             model_version (str): 模型版本，'base' 或 'longtail'
@@ -40,6 +70,7 @@ class AlignModule(nn.Module):
         self.out_channels = out_channels
         self.num_blocks = num_blocks
         self.input_types = input_types
+        self.residual_with_norm = residual_with_norm  # 是否使用归一化的残差块
 
         self.downsample_times = downsample_times
         self.downsample_blocks = nn.ModuleList()
@@ -55,30 +86,64 @@ class AlignModule(nn.Module):
             hidden_channels = self.hidden_channels * (channel_times ** down_index)
             residual_blocks = nn.ModuleList()
             for _ in range(self.num_blocks):
-                residual_blocks.append(ResidualBlock(hidden_channels, hidden_channels))
+                residual_blocks.append(ResidualBlock(hidden_channels, hidden_channels, with_norm=self.residual_with_norm))
             self.downsample_blocks.append(nn.Sequential(*residual_blocks))
             self.downsample_blocks.append(nn.Conv2d(hidden_channels, hidden_channels * channel_times, kernel_size=3, stride=2, padding=1))
 
         if self.model_version == 'longtail':
             # 在longtail版本中，最后一个下采样阶段的输出通道数为out_channels
+            hidden_channels = hidden_channels // channel_times
             self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * (channel_times ** self.downsample_times), 
-                                                    self.hidden_channels * channel_times, 
-                                                    kernel_size=3,
+                                                    hidden_channels,
+                                                    kernel_size=1,
                                                     stride=1,
-                                                    padding=1))
+                                                    padding=0))
             residual_blocks = nn.ModuleList()
-            for _ in range(self.num_blocks):
-                residual_blocks.append(ResidualBlock(self.hidden_channels * channel_times, self.hidden_channels * channel_times))
+            for _ in range(self.out_channels - self.num_blocks * self.downsample_times):
+                residual_blocks.append(ResidualBlock(hidden_channels, hidden_channels, with_norm=self.residual_with_norm))
             self.downsample_blocks.append(nn.Sequential(*residual_blocks))
-            self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * channel_times, out_channels, kernel_size=3, padding=1, stride=1))
+            self.downsample_blocks.append(nn.Conv2d(hidden_channels, out_channels, kernel_size=3, padding=1, stride=1))
 
         elif self.model_version == 'base':
             self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * (channel_times ** self.downsample_times), out_channels, kernel_size=1))
 
+        elif self.model_version == 'variational':
+            hidden_channels = hidden_channels // channel_times
+            self.downsample_blocks.append(nn.Conv2d(self.hidden_channels * (channel_times ** self.downsample_times), 
+                                                    hidden_channels,
+                                                    kernel_size=1,
+                                                    stride=1,
+                                                    padding=0))
+            residual_blocks = nn.ModuleList()
+            for _ in range(self.out_channels - self.num_blocks * self.downsample_times):
+                residual_blocks.append(ResidualBlock(hidden_channels, hidden_channels, with_norm=self.residual_with_norm))
+            self.downsample_blocks.append(nn.Sequential(*residual_blocks))
+            
+            self.out_channels = self.out_channels * 2
+            self.downsample_blocks.append(nn.Conv2d(hidden_channels, self.out_channels, kernel_size=3, padding=1, stride=1))
+
+
         self.latent_trans_blocks = nn.ModuleList()
         self.latent_trans_blocks.append(nn.Conv2d(self.in_channels, self.out_channels, kernel_size=1))
-        self.latent_trans_blocks.append(ResidualBlock(self.out_channels, self.out_channels))
+        self.latent_trans_blocks.append(ResidualBlock(self.out_channels, self.out_channels, with_norm=self.residual_with_norm))
+        # self.latent_trans_blocks.append(nn.Conv2d(self.out_channels, self.out_channels, kernel_size=3, padding=1, stride=1))
 
+    def sample(self, feature, generator):
+        from diffusers.models.autoencoders.vae import DiagonalGaussianDistribution
+        """ Args:
+            feature (torch.Tensor): 输入特征张量，形状为 [batch_size, channels, height, width]
+        Returns:
+            torch.Tensor: 采样后的张量，形状为 [batch_size, out_channels, height/2^downsample_times, width/2^downsample_times]
+        """
+        # 假设feature是潜在变量的均值和对数方差
+        if self.model_version == 'variational':
+            dist = DiagonalGaussianDistribution(feature)
+            z = dist.sample(generator)  # 从分布中采样
+            
+            return z, dist
+        else:
+            # 对于其他模型版本，直接返回特征
+            return feature, None
 
     def forward(self, x, z):
         """
@@ -127,6 +192,7 @@ class AlignPipeline:
                  downsample_times=3,
                  channel_times=4,
                  input_types=['image', 'latent'],
+                 residual_with_norm=False,
                  device='cuda', 
                  dtype=torch.bfloat16):
 
@@ -134,6 +200,7 @@ class AlignPipeline:
         self.VAE_2 = VAE_2
         self.device = device
         self.dtype = dtype
+        self.model_version = model_version  # 模型版本
 
         self.align_module = AlignModule(
             model_version=model_version,  # 模型版本
@@ -144,7 +211,8 @@ class AlignPipeline:
             num_blocks=num_blocks,  # 每个下采样阶段的残差块数量
             downsample_times=downsample_times,  # 下采样次数
             channel_times=channel_times,  # 通道扩展倍数
-            input_types=input_types  # 输入类型列表
+            input_types=input_types,  # 输入类型列表
+            residual_with_norm=residual_with_norm  # 是否使用归一化的残差块
         ).to(device=self.device, dtype=self.dtype)
         
     def freeze_vae(self):
@@ -153,7 +221,22 @@ class AlignPipeline:
             param.requires_grad = False
         for param in self.VAE_2.parameters():
             param.requires_grad = False
-    
+            
+    def _get_latents_dist(self, vae, image: torch.Tensor, generator=None, transform=True):
+        """
+        获取VAE编码后的潜在变量特征
+        Args:
+            vae: VAE模型
+            image (torch.Tensor): 输入图像张量，形状为 [batch_size, channels, height, width]
+            generator: 随机数生成器
+            transform (bool): 是否对潜在变量进行变换
+        Returns:
+            torch.Tensor: 编码后的潜在变量特征
+        """
+        encode_output = vae.encode(image)
+
+        return encode_output.latent_dist
+
     def _encode_vae_image(self, vae, image: torch.Tensor, generator=None, transform=True, sample_mode="sample"):
         from diffusers.pipelines.flux.pipeline_flux_img2img import retrieve_latents
         
@@ -229,15 +312,29 @@ class AlignPipeline:
             x = x * 2 - 1  # 将图像归一化到[-1, 1]范围
         
         with torch.no_grad():
-            # 编码VAE_1的图像
-            z_vae1 = self._encode_vae_image(self.VAE_1, x, generator, sample_mode='mean')
-            z_vae1 = z_vae1.to(device=self.device, dtype=self.dtype)
-            # 编码VAE_2的图像
-            z_vae2 = self._encode_vae_image(self.VAE_2, x, generator, sample_mode='mean')
-            z_vae2 = z_vae2.to(device=self.device, dtype=self.dtype)
+            if self.model_version == 'variational':
+                # 编码VAE_1的图像
+                z_vae1 = self._encode_vae_image(self.VAE_1, x, generator, sample_mode='sample')
+                z_vae1 = z_vae1.to(device=self.device, dtype=self.dtype)
+                # 编码VAE_2的图像
+                z_vae2 = self._encode_vae_image(self.VAE_2, x, generator, sample_mode='sample')
+                z_vae2 = z_vae2.to(device=self.device, dtype=self.dtype)
+                
+                z_vae2_dist = self._get_latents_dist(self.VAE_2, x, generator, transform=True)
+                
+            else:
+                # 编码VAE_1的图像
+                z_vae1 = self._encode_vae_image(self.VAE_1, x, generator, sample_mode='mean')
+                z_vae1 = z_vae1.to(device=self.device, dtype=self.dtype)
+                # 编码VAE_2的图像
+                z_vae2 = self._encode_vae_image(self.VAE_2, x, generator, sample_mode='mean')
+                z_vae2 = z_vae2.to(device=self.device, dtype=self.dtype)
 
         # 对齐模块前向传播
         z_vae1_aligned = self.align_module(x, z_vae1)
+        
+        if self.model_version == 'variational':
+            z_vae1_aligned, z_vae1_aligned_dist = self.align_module.sample(z_vae1_aligned, generator)
         
         total_loss = 0
         loss_dict = {}
@@ -260,6 +357,19 @@ class AlignPipeline:
                 x_vae1_aligned = self._decode_vae_latents(self.VAE_2, z_vae1_aligned, do_normalize=True)
                 x_vae2 = self._decode_vae_latents(self.VAE_2, z_vae2, do_normalize=True)
                 loss = lpips_criterion(x_vae1_aligned, x_vae2) * loss_weight
+            elif loss_type == 'huber':
+                # 假设有一个预定义的Huber损失函数
+                from losses import HuberLoss
+                huber_criterion = HuberLoss(delta=0.15, reduction='mean')
+                loss = huber_criterion(z_vae1_aligned, z_vae2) * loss_weight
+            elif loss_type == 'DCT':
+                # 假设有一个预定义的DCT损失函数
+                from losses import DCTLoss
+                dct_criterion = DCTLoss(device=self.device, dtype=self.dtype)
+                loss = dct_criterion(z_vae1_aligned, z_vae2) * loss_weight
+            elif loss_type == 'KL':
+                # 假设有一个预定义的KL散度损失函数
+                loss = z_vae1_aligned_dist.kl(z_vae2_dist).mean() * loss_weight
             else:
                 raise ValueError(f"Unknown loss type: {loss_type}")
             

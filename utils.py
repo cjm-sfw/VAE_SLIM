@@ -477,6 +477,33 @@ def plot_figure(tensor, save_path=None):
     if save_path:
         plt.savefig(save_path)
     plt.close()
+    
+def plot_figure_for_channel_gray(tensor_list, ncols=4, save_path=None):
+    """
+    输入一个列表，列表中的每个元素是一个张量，张量的维度为[H, W]
+    """
+    n = len(tensor_list)
+    fig, axs = plt.subplots(nrows=(n + ncols - 1) // ncols, ncols=ncols, figsize=(ncols*5, 5 * ((n + ncols - 1) // ncols)))
+    axs = axs.flatten()
+    
+    for i, tensor in enumerate(tensor_list):
+        axs[i].imshow(tensor.cpu().numpy(), cmap='Spectral')
+        axs[i].set_title(f'Channel {i+1}')
+        axs[i].axis('off')
+        
+        cbar = plt.colorbar(axs[i].images[0], ax=axs[i], fraction=0.046, pad=0.04)
+        cbar.ax.tick_params(labelsize=8)
+        cbar.ax.set_title('Value', fontsize=8)
+    
+    for j in range(i + 1, len(axs)):
+        axs[j].axis('off')
+    
+    plt.tight_layout()
+    plt.show()
+    if save_path:
+        plt.savefig(save_path)
+    plt.close()
+
 
 
 def analyze_edge_reconstruction(original_img, reconstructed_img, save_path=None):

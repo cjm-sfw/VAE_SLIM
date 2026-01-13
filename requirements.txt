@@ -17,3 +17,4 @@ lpips
 pillow
 clean-fid
 dotenv
+tensorboard
