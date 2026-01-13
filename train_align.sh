@@ -12,7 +12,7 @@ python train_align_with_args.py \
   --loss_weight 1.0 0.1 \
   --training_stage 1 \
   --grad_clip 8 \
-  --num_workers 4 \
+  --num_workers 8 \
   --it_or_epochs iterations \
   --iterations 100000 \
   --scheduler_step_size 40000 \

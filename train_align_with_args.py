@@ -302,9 +302,8 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
     # Determine training mode
     if args.it_or_epochs == "iterations":
         print(f"Training in iteration mode for {args.iterations} iterations")
-        # Create infinite data iterator for iteration mode
-        import itertools
-        train_data_iter = itertools.cycle(train_loader)
+        # Create data iterator for iteration mode (without caching)
+        train_data_iter = iter(train_loader)
         total_iterations = args.iterations
     else:
         print(f"Training in epoch mode for {args.epochs} epochs")
@@ -390,8 +389,13 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
         for iteration in tqdm(range(total_iterations)):
             pipeline.align_module.train()
             
-            # Get next batch from infinite iterator
-            x = next(train_data_iter)
+            # Get next batch from iterator, handle StopIteration by recreating iterator
+            try:
+                x = next(train_data_iter)
+            except StopIteration:
+                # Recreate iterator when dataset is exhausted
+                train_data_iter = iter(train_loader)
+                x = next(train_data_iter)
             
             # Warmup learning rate
             if global_step < args.warmup_steps:
@@ -444,9 +448,27 @@ def train_align_pipeline(args, vae1, vae2, train_loader, eval_loader, generator)
             if iteration % args.visualize_frequency == 0:
                 visualize_results(pipeline, eval_loader, writer, iteration, args, dtype)
             
-            # Print progress
+            # Print progress and monitor memory
             if iteration % 100 == 0:
                 print(f"Iteration {iteration}/{total_iterations}: {loss_dict}, LR: {current_lr:.2e}")
+                
+                # Monitor GPU memory usage
+                if torch.cuda.is_available():
+                    memory_allocated = torch.cuda.memory_allocated() / 1024**3
+                    memory_reserved = torch.cuda.memory_reserved() / 1024**3
+                    print(f"GPU Memory - Allocated: {memory_allocated:.2f}GB, Reserved: {memory_reserved:.2f}GB")
+                    writer.add_scalar('Memory/GPU_Allocated', memory_allocated, iteration)
+                    writer.add_scalar('Memory/GPU_Reserved', memory_reserved, iteration)
+            
+            # Periodic memory cleanup
+            if iteration % 1000 == 0:
+                if torch.cuda.is_available():
+                    torch.cuda.empty_cache()
+                    print(f"Iteration {iteration}: GPU cache cleared")
+                
+                # Force garbage collection
+                import gc
+                gc.collect()
             
             # Save checkpoint
             if args.save_frequency > 0 and iteration % args.save_frequency == 0:
